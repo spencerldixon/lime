@@ -1,7 +1,12 @@
-# lime
+# 🍋‍🟩 lime
 
-Markdown for Ghostty. Large headings, readable tables, highlighted code, and your
-terminal's own theme, scrolling, selection, and search.
+Markdown in the terminal.
+
+Large headings, readable tables, highlighted code, images,
+mermaid diagrams, all using your terminal's own 
+theme with native scrollback, selection, and search.
+
+Built for ghostty, might work with other things, idk, I haven't tested it.
 
 ```sh
 lime DOC.md
