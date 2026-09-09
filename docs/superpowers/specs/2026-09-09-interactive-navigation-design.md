@@ -368,6 +368,30 @@ implementation plan.
 2. **Is the anchored re-anchor flash perceptible?** Decides whether `auto`
    resolves to `scroll` or `reprint` on macOS.
 
+## Documentation
+
+The README gains a section on interactive navigation, written for a developer
+reading this project for the first time. Plain English, no insider shorthand.
+
+- Spell out what a "prompt mark" is and why a Markdown reader emits one. A
+  reader who has never heard of OSC 133 must still follow the paragraph.
+- Explain the division of labour in one sentence a newcomer can repeat back:
+  lime prints and marks, Ghostty scrolls and searches.
+- Say why the control bar is in the window title rather than on the screen, in
+  terms of what the reader can observe — scroll up and an on-screen bar would be
+  gone, the title stays.
+- State the tracking limitation directly. A reader must not have to discover by
+  surprise that the title lags a manual scroll.
+- Document every key, and name the Ghostty-native ones (⌘F, ⌘↑, ⌘↓) alongside
+  lime's own, so the reader learns the whole set rather than half of it.
+- Note the macOS-only jump and what Linux does instead.
+- Avoid terms the surrounding README does not already establish. Where a term is
+  unavoidable, define it on first use.
+
+`docs/ideas.md` is updated in the same change: its claim that no arbitrary-row
+jump exists is corrected, and the sections this design implements are marked as
+shipped rather than proposed.
+
 ## Out of scope
 
 Fuzzy scoring beyond subsequence matching, a horizontal paging mode, live reload
