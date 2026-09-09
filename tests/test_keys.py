@@ -1,10 +1,12 @@
 import os
 import termios
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from test_terminal import assert_restored
 
-from lime.keys import Key, decode, raw_mode
+from lime.keys import Key, decode, raw_mode, read_key
 
 
 @pytest.mark.parametrize(
@@ -73,6 +75,49 @@ def test_raw_mode_restores_on_exception():
         with pytest.raises(RuntimeError), raw_mode(slave):
             raise RuntimeError("boom")
         assert_restored(slave, original)
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_read_key_reads_a_plain_character():
+    master, slave = os.openpty()
+    try:
+        with raw_mode(slave):
+            os.write(master, b"t")
+            assert read_key(slave) == "t"
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_read_key_reads_an_escape_sequence_delivered_in_one_write():
+    master, slave = os.openpty()
+    try:
+        with raw_mode(slave):
+            os.write(master, b"\x1b[A")
+            assert read_key(slave) == Key.UP
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_read_key_reassembles_a_sequence_split_across_two_writes():
+    # A real delay between the two writes forces read_key's first os.read() to
+    # see only the prefix, exercising the partial-sequence continuation path.
+    master, slave = os.openpty()
+    try:
+        with raw_mode(slave):
+
+            def send():
+                os.write(master, b"\x1b[")
+                time.sleep(0.05)
+                os.write(master, b"A")
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                peer = pool.submit(send)
+                assert read_key(slave, timeout=0.5) == Key.UP
+                peer.result(timeout=2)
     finally:
         os.close(master)
         os.close(slave)
