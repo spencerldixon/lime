@@ -143,6 +143,22 @@ It grows scrollback and creates duplicate ⌘F hits, so it is not the default
 where a real jump is available. Config key `jump: auto | scroll | reprint`,
 defaulting to `auto`.
 
+#### Opening position
+
+Printing ends at the bottom of the document, which is the wrong place to start
+reading. When the reader starts, it jumps to the first heading so the document
+opens at its beginning.
+
+The jump reuses the layer 3 mechanism exactly — mark index 0 — rather than
+`scroll_to_top`, which would scroll above lime's output into whatever shell
+history preceded it. Content before the first heading (a preamble paragraph, the
+configured vertical padding) sits above that mark and is reached by scrolling up
+a line or two.
+
+A document with no headings has no marks and is left where printing ended.
+Where jumping is unavailable, so is the opening jump; lime does not reprint the
+document to simulate it, since the document is already on screen.
+
 ## The control bar
 
 A persistent bar and native scrollback are in genuine physical tension, and the
@@ -160,6 +176,9 @@ the only option that is genuinely persistent without surrendering scrollback.
 ```
 lime · README.md · Installation 3/8 · ? for keys
 ```
+
+Because the reader opens by jumping to the first heading, the section field is
+populated from the start in a document that has headings.
 
 `DECSTBM` is rejected: it is invisible exactly when the reader is scrolled up,
 which is most of a reading session, and it additionally depends on unverified

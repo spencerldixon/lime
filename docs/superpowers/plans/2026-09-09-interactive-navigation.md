@@ -83,7 +83,7 @@ def test_document_without_headings():
 
 
 def test_match_returns_positions_of_a_subsequence():
-    assert match("isl", "Installation") == (0, 3, 5)
+    assert match("isl", "Installation") == (0, 2, 5)
 
 
 def test_match_is_case_insensitive():
@@ -987,6 +987,7 @@ The decision logic is a pure function so the whole interaction is tested without
   - `Action` str-enum: `QUIT`, `JUMP`, `TOP`, `BOTTOM`, `REDRAW`, `OPEN`, `CLOSE`
   - `step(state, key, sections) -> tuple[State, Action | None]`
   - `bar(name: str, sections, current) -> str`
+  - `initial_state(sections: list[Section]) -> State`
   - `run(...) -> int`
 
 - [ ] **Step 1: Write the failing tests**
@@ -995,7 +996,7 @@ The decision logic is a pure function so the whole interaction is tested without
 # tests/test_reader.py
 from lime.keys import Key
 from lime.outline import Section
-from lime.reader import Action, State, bar, step
+from lime.reader import Action, State, bar, initial_state, step
 
 SECTIONS = [
     Section("Install", 2, 0, 0),
@@ -1107,6 +1108,19 @@ def test_bar_omits_the_section_before_any_jump():
 
 def test_bar_names_the_last_jumped_section():
     assert bar("README.md", SECTIONS, 1) == "lime · README.md · Configure 2/3 · ? for keys"
+
+
+def test_reader_opens_at_the_first_section_not_where_printing_ended():
+    assert initial_state(SECTIONS).current == 0
+
+
+def test_a_document_without_headings_opens_where_printing_ended():
+    assert initial_state([]).current is None
+
+
+def test_the_opening_state_is_otherwise_idle():
+    state = initial_state(SECTIONS)
+    assert state.mode == "idle" and state.query == "" and state.selected == 0
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1150,6 +1164,12 @@ class State:
     query: str = ""
     selected: int = 0
     current: int | None = None
+
+
+def initial_state(sections: list[Section]) -> State:
+    """Open at the first heading: printing ends at the bottom, which is the wrong
+    place to start reading."""
+    return State(current=0 if sections else None)
 
 
 def bar(name: str, sections: list[Section], current: int | None) -> str:
@@ -1224,7 +1244,7 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal, mode: str)
     if mode != "reprint":
         bridge.discover(stream)
     jump = None if bridge.available else "reprint"
-    state = State()
+    state = initial_state(sections)
     size = [terminal.columns, terminal.rows]
 
     def resized(*_):
@@ -1236,6 +1256,9 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal, mode: str)
     previous = signal.signal(signal.SIGWINCH, resized)
     try:
         with raw_mode(fd):
+            if state.current is not None and not bridge.jump(state.current, len(sections)):
+                # Nothing moved, so the bar must not claim a reading position.
+                jump, state = "reprint", replace(state, current=None)
             stream.write(title(bar(name, sections, state.current)))
             stream.flush()
             while True:
@@ -1485,6 +1508,20 @@ In the table of contents, type to filter headings, move with the arrow keys or
 Ctrl-N / Ctrl-P, press Enter to jump, and Escape to close. Plain `j` and `k` are
 not shortcuts there, because you may be typing them into the filter.
 
+### Where you start
+
+A terminal prints downwards, so the moment lime finishes you are looking at the
+*end* of the document. That is the wrong place to begin, so before handing over
+the keyboard lime jumps you to the first heading.
+
+It uses the same bookmark mechanism as everything else — it jumps to the first
+mark rather than scrolling to the very top of the window, because the top of the
+window is whatever your shell printed before you ran lime, not your document.
+Anything above the first heading, such as an opening paragraph, is a line or two
+further up.
+
+A document with no headings has no bookmarks, so it opens at the end.
+
 ### Two things that will look odd at first
 
 **The bar is in the window title, not on the screen.** A status line drawn at the
@@ -1519,6 +1556,14 @@ In the intro paragraph, replace "It doesn't launch a pager or capture your mouse
 ```markdown
 It doesn't launch a pager or capture your mouse and scrolling keys. In Ghostty it
 stays open for a few navigation keys — press **?** to see them, **q** to leave.
+```
+
+In the same paragraph, replace "Long documents finish at the bottom; scroll upwards to begin reading." with:
+
+```markdown
+Printing ends at the bottom of a long document, so lime scrolls you back to the
+first heading before handing over the keyboard. When it can't — see below — a
+long document opens at its end and you scroll up to start reading.
 ```
 
 Add to the Options block:
