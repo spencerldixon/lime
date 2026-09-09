@@ -146,16 +146,25 @@ defaulting to `auto`.
 #### Opening position
 
 Printing ends at the bottom of the document, which is the wrong place to start
-reading. When the reader starts, it jumps to the first heading so the document
-opens at its beginning.
+reading. When the reader starts, it jumps to the document's first character, so
+every document opens at its true beginning — including one with no headings at
+all.
 
-The jump reuses the layer 3 mechanism exactly — mark index 0 — rather than
-`scroll_to_top`, which would scroll above lime's output into whatever shell
-history preceded it. Content before the first heading (a preamble paragraph, the
-configured vertical padding) sits above that mark and is reached by scrolling up
-a line or two.
+This requires a mark that is not a heading. Rendering therefore emits one mark at
+the very start of its output, before any content, in addition to one per heading.
+`scroll_to_top` is still rejected: it scrolls above lime's output into whatever
+shell history preceded it, which is not the document.
 
-A document with no headings has no marks and is left where printing ended.
+**Mark numbering.** The document-start mark is index 0; the heading at outline
+index `i` is mark index `i + 1`; a document with `n` headings has `n + 1` marks.
+The outline itself is unchanged — it lists headings only — so every consumer that
+jumps to a heading converts through that `+ 1`. Centralising the conversion in
+one function keeps the off-by-one in a single place.
+
+**Unmeasured.** Whether `jump_to_prompt:-k` counts from the last mark or from
+below it is not yet observed, so the exact delta may be off by one. The formula
+lives in one function precisely so a single constant corrects it once measured.
+
 Where jumping is unavailable, so is the opening jump; lime does not reprint the
 document to simulate it, since the document is already on screen.
 

@@ -273,6 +273,10 @@ Immediately after `tokens = document.parsed`, add:
 
 ```python
     sections = outline(tokens)
+    if marks:
+        # Mark 0 is the document's start, so a document with no headings at all
+        # still has somewhere to open at. Heading i is mark i + 1.
+        console.file.write("\x1b]133;A\x1b\\")
 ```
 
 Inside the `while index < len(tokens):` loop, as the **first** statement after `token = tokens[index]`, add the mark emission. It must run for image and text headings alike, before either branch prints anything:
@@ -774,7 +778,8 @@ Surface discovery by title nonce, a persistent `osascript` helper, and the ancho
 **Interfaces:**
 - Produces:
   - `title(text: str) -> str` — OSC 2 sequence
-  - `jump_actions(index: int, total: int) -> list[str]`
+  - `START = -1` — the document-start mark, jumped to like any section
+  - `jump_actions(index: int, total: int) -> list[str]` — `total` counts headings, not marks
   - `Bridge(runner=None)` with `discover(stream) -> bool`, `perform(action) -> bool`, `jump(index, total) -> bool`, `available -> bool`, `close()`
   - `RUNNER_UNAVAILABLE` sentinel reason string `"reprint"`
 
@@ -784,7 +789,7 @@ Surface discovery by title nonce, a persistent `osascript` helper, and the ancho
 # tests/test_ghostty.py
 import io
 
-from lime.ghostty import Bridge, jump_actions, title
+from lime.ghostty import START, Bridge, jump_actions, title
 
 
 def test_title_is_an_osc_2_sequence():
@@ -796,9 +801,23 @@ def test_title_strips_control_characters():
 
 
 def test_jump_reanchors_then_walks_back_from_the_end():
-    assert jump_actions(0, 8) == ["scroll_to_bottom", "jump_to_prompt:-7"]
-    assert jump_actions(7, 8) == ["scroll_to_bottom", "jump_to_prompt:0"]
-    assert jump_actions(5, 8) == ["scroll_to_bottom", "jump_to_prompt:-2"]
+    assert jump_actions(0, 8) == ["scroll_to_bottom", "jump_to_prompt:-8"]
+    assert jump_actions(7, 8) == ["scroll_to_bottom", "jump_to_prompt:-1"]
+    assert jump_actions(5, 8) == ["scroll_to_bottom", "jump_to_prompt:-3"]
+
+
+def test_start_walks_back_past_every_heading_to_the_document_mark():
+    assert jump_actions(START, 8) == ["scroll_to_bottom", "jump_to_prompt:-9"]
+
+
+def test_a_document_with_no_headings_still_has_a_start_mark_to_reach():
+    assert jump_actions(START, 0) == ["scroll_to_bottom", "jump_to_prompt:-1"]
+
+
+def test_no_jump_is_ever_a_negative_zero():
+    for total in range(0, 6):
+        for index in [START, *range(total)]:
+            assert "-0" not in jump_actions(index, total)[1]
 
 
 class FakeRunner:
@@ -879,6 +898,7 @@ from typing import TextIO
 
 from lime.terminal import clean_text
 
+START = -1
 FIND = """
 tell application "Ghostty"
   repeat with w in windows
@@ -903,8 +923,15 @@ def title(text: str) -> str:
 
 
 def jump_actions(index: int, total: int) -> list[str]:
-    """Anchor at the bottom so the walk back is independent of manual scrolling."""
-    return ["scroll_to_bottom", f"jump_to_prompt:-{total - index - 1}"]
+    """Anchor at the bottom, then walk back to one mark; total counts headings.
+
+    Marks are 0 for the document's start and i + 1 for heading i, so a document
+    with n headings carries n + 1 of them. Anchoring first makes the walk
+    independent of wherever the reader has scrolled by hand.
+    """
+    marks = total + 1
+    mark = 0 if index == START else index + 1
+    return ["scroll_to_bottom", f"jump_to_prompt:-{marks - mark}"]
 
 
 def osascript(script: str) -> str:
@@ -987,7 +1014,6 @@ The decision logic is a pure function so the whole interaction is tested without
   - `Action` str-enum: `QUIT`, `JUMP`, `TOP`, `BOTTOM`, `REDRAW`, `OPEN`, `CLOSE`
   - `step(state, key, sections) -> tuple[State, Action | None]`
   - `bar(name: str, sections, current) -> str`
-  - `initial_state(sections: list[Section]) -> State`
   - `run(...) -> int`
 
 - [ ] **Step 1: Write the failing tests**
@@ -996,7 +1022,7 @@ The decision logic is a pure function so the whole interaction is tested without
 # tests/test_reader.py
 from lime.keys import Key
 from lime.outline import Section
-from lime.reader import Action, State, bar, initial_state, step
+from lime.reader import Action, State, bar, step
 
 SECTIONS = [
     Section("Install", 2, 0, 0),
@@ -1110,17 +1136,9 @@ def test_bar_names_the_last_jumped_section():
     assert bar("README.md", SECTIONS, 1) == "lime · README.md · Configure 2/3 · ? for keys"
 
 
-def test_reader_opens_at_the_first_section_not_where_printing_ended():
-    assert initial_state(SECTIONS).current == 0
-
-
-def test_a_document_without_headings_opens_where_printing_ended():
-    assert initial_state([]).current is None
-
-
-def test_the_opening_state_is_otherwise_idle():
-    state = initial_state(SECTIONS)
-    assert state.mode == "idle" and state.query == "" and state.selected == 0
+def test_the_bar_claims_no_section_at_the_document_start():
+    # The reader opens at the start mark, which is not any section.
+    assert bar("README.md", SECTIONS, None) == "lime · README.md · ? for keys"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1142,7 +1160,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TextIO
 
-from lime.ghostty import Bridge, title
+from lime.ghostty import START, Bridge, title
 from lime.keys import Key, raw_mode, read_key
 from lime.outline import Section, filtered
 from lime.overlay import erase, height, help_text, picker, reserve
@@ -1164,12 +1182,6 @@ class State:
     query: str = ""
     selected: int = 0
     current: int | None = None
-
-
-def initial_state(sections: list[Section]) -> State:
-    """Open at the first heading: printing ends at the bottom, which is the wrong
-    place to start reading."""
-    return State(current=0 if sections else None)
 
 
 def bar(name: str, sections: list[Section], current: int | None) -> str:
@@ -1244,7 +1256,7 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal, mode: str)
     if mode != "reprint":
         bridge.discover(stream)
     jump = None if bridge.available else "reprint"
-    state = initial_state(sections)
+    state = State()
     size = [terminal.columns, terminal.rows]
 
     def resized(*_):
@@ -1256,9 +1268,10 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal, mode: str)
     previous = signal.signal(signal.SIGWINCH, resized)
     try:
         with raw_mode(fd):
-            if state.current is not None and not bridge.jump(state.current, len(sections)):
-                # Nothing moved, so the bar must not claim a reading position.
-                jump, state = "reprint", replace(state, current=None)
+            # Printing ends at the document's foot; open at its head instead.
+            # Every document has a start mark, so this works without headings.
+            if not bridge.jump(START, len(sections)):
+                jump = "reprint"
             stream.write(title(bar(name, sections, state.current)))
             stream.flush()
             while True:
@@ -1512,15 +1525,13 @@ not shortcuts there, because you may be typing them into the filter.
 
 A terminal prints downwards, so the moment lime finishes you are looking at the
 *end* of the document. That is the wrong place to begin, so before handing over
-the keyboard lime jumps you to the first heading.
+the keyboard lime takes you back to the document's first line.
 
-It uses the same bookmark mechanism as everything else — it jumps to the first
-mark rather than scrolling to the very top of the window, because the top of the
-window is whatever your shell printed before you ran lime, not your document.
-Anything above the first heading, such as an opening paragraph, is a line or two
-further up.
-
-A document with no headings has no bookmarks, so it opens at the end.
+It does this with the same bookmarks it uses for headings: as well as one per
+heading, lime leaves one at the very top of the document. That top bookmark is
+why this works for a document with no headings in it at all, and it is why lime
+does not simply scroll the window to the top — the top of the window is whatever
+your shell printed before you ran lime, which is not your document.
 
 ### Two things that will look odd at first
 
@@ -1562,8 +1573,8 @@ In the same paragraph, replace "Long documents finish at the bottom; scroll upwa
 
 ```markdown
 Printing ends at the bottom of a long document, so lime scrolls you back to the
-first heading before handing over the keyboard. When it can't — see below — a
-long document opens at its end and you scroll up to start reading.
+top before handing over the keyboard. When it can't — see below — a long
+document opens at its end and you scroll up to start reading.
 ```
 
 Add to the Options block:
