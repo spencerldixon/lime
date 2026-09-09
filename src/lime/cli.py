@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if source.strip() and vertical:
             console.print("\n" * vertical, end="")
-        render(
+        sections = render(
             source,
             console,
             base=Path.cwd() if args.file == "-" else path.resolve().parent,
@@ -127,11 +127,13 @@ def main(argv: list[str] | None = None) -> int:
             headings=headings,
             heading_labels=heading_labels,
             line_numbers=line_numbers,
+            marks=terminal.is_tty and not plain,
             mermaid=mermaid,
             images=Images(terminal, width - margin * 2)
             if graphics and (settings.images if args.images is None else args.images)
             else None,
         )
+        del sections  # consumed by the reader in a later task
         if source.strip() and vertical:
             console.print("\n" * vertical, end="")
     except BrokenPipeError:

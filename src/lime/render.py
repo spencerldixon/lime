@@ -19,7 +19,7 @@ from rich.text import Text
 from rich.theme import Theme
 
 from lime.graphics import Headings
-from lime.outline import heading_text
+from lime.outline import Section, heading_text, outline
 from lime.terminal import clean_text
 
 
@@ -163,9 +163,10 @@ def render(
     headings: Headings | None = None,
     heading_labels: bool = True,
     line_numbers: bool = True,
+    marks: bool = False,
     mermaid=None,
     images=None,
-) -> None:
+) -> list[Section]:
     document = Document(
         clean_text(source),
         code_theme="ansi_light",
@@ -174,6 +175,7 @@ def render(
     )
     prepare(document.parsed, base)
     tokens = document.parsed
+    sections = outline(tokens)
 
     def emit(batch: list[Token]) -> None:
         if batch:
@@ -182,8 +184,19 @@ def render(
 
     batch: list[Token] = []
     index = 0
+    if marks:
+        # Mark 0 is the document start, so lime can always open at the first
+        # character even when there are no headings at all. Mark i + 1 is the
+        # heading at outline index i, so total marks == len(sections) + 1.
+        console.file.write("\x1b]133;A\x1b\\")
     while index < len(tokens):
         token = tokens[index]
+        if marks and token.type == "heading_open" and token.level == 0:
+            # Ghostty records a prompt mark here, so its own jump_to_prompt
+            # walks headings. The predicate must match outline() exactly.
+            emit(batch)
+            batch = []
+            console.file.write("\x1b]133;A\x1b\\")
         if (
             images
             and token.type == "paragraph_open"
@@ -239,3 +252,4 @@ def render(
             batch.append(token)
             index += 1
     emit(batch)
+    return sections

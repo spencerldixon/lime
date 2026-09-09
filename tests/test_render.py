@@ -9,10 +9,12 @@ from rich.cells import cell_len
 from rich.console import Console
 
 from lime.graphics import Headings, encode_png, load_font, wrap_heading
+from lime.outline import Section
 from lime.render import markdown_theme, render
 from lime.terminal import Terminal
 
 PALETTE = ((100, 180, 80), (80, 180, 180), (100, 140, 220))
+MARK = "\x1b]133;A\x1b\\"
 
 
 def output(source, width=80, graphics=False, labels=True, color=False):
@@ -134,3 +136,69 @@ def test_unicode_tables_fit_terminal_cells(width):
     result = output("| 名称 | 値 |\n|---|---|\n| 日本語 | café 🍋 |", width=width)
     assert "日本語" in result and "café" in result
     assert all(cell_len(line) <= width for line in result.splitlines())
+
+
+def test_render_returns_the_outline():
+    console = Console(file=io.StringIO(), width=40)
+    sections = render("# One\n\n## Two\n", console, base=Path.cwd())
+    assert sections == [Section("One", 1, 0, 0), Section("Two", 2, 1, 2)]
+
+
+def test_marks_precede_every_top_level_heading():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
+    render("# One\n\ntext\n\n## Two\n", console, base=Path.cwd(), marks=True)
+    output_text = stream.getvalue()
+    # One document-start mark plus one per top-level heading (mark 0 = start).
+    assert output_text.count(MARK) == 3
+    assert output_text.index(MARK) < output_text.index("One")
+    assert output_text.index(MARK, output_text.index("One")) < output_text.index("Two")
+
+
+def test_no_marks_unless_requested():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40)
+    render("# One\n", console, base=Path.cwd())
+    assert MARK not in stream.getvalue()
+
+
+def test_nested_headings_get_no_marks_and_no_outline_entry():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
+    sections = render("- # Nested\n", console, base=Path.cwd(), marks=True)
+    output_text = stream.getvalue()
+    # Only the document-start mark: the nested heading gets no mark of its own.
+    assert sections == [] and output_text.count(MARK) == 1
+
+
+def test_headingless_document_still_gets_a_start_mark():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
+    sections = render("Just a paragraph, no headings.\n", console, base=Path.cwd(), marks=True)
+    output_text = stream.getvalue()
+    assert sections == []
+    assert output_text.count(MARK) == 1
+    assert output_text.index(MARK) < output_text.index("Just a paragraph")
+
+
+def test_mark_count_is_sections_plus_one_for_the_document_start():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
+    render("# One\n\n## Two\n", console, base=Path.cwd(), marks=True)
+    assert stream.getvalue().count(MARK) == 3
+
+
+def test_start_mark_precedes_all_content_including_the_first_heading_mark():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
+    render("# One\n", console, base=Path.cwd(), marks=True)
+    output_text = stream.getvalue()
+    first_mark_end = output_text.index(MARK) + len(MARK)
+    assert output_text.index(MARK, first_mark_end) < output_text.index("One")
+
+
+def test_no_start_mark_unless_marks_requested():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40)
+    render("No headings here.\n", console, base=Path.cwd())
+    assert MARK not in stream.getvalue()
