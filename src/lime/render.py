@@ -19,6 +19,7 @@ from rich.text import Text
 from rich.theme import Theme
 
 from lime.graphics import Headings
+from lime.outline import heading_text
 from lime.terminal import clean_text
 
 
@@ -134,17 +135,6 @@ def prepare(tokens: list[Token], base: Path) -> None:
                 token.attrSet(name, safe_link(value, base))
         if token.children:
             prepare(token.children, base)
-
-
-def heading_text(token: Token) -> str:
-    return "".join(
-        heading_text(child)
-        if child.children
-        else " "
-        if child.type in {"softbreak", "hardbreak"}
-        else child.content
-        for child in token.children or []
-    )
 
 
 def markdown_theme() -> Theme:
