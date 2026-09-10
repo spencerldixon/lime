@@ -1,6 +1,8 @@
 # 🍋‍🟩 lime
 
-Browse markdown files in your terminal
+### Beautiful markdown rendering in your terminal
+
+![Lime demo](demo.gif "Demo")
 
 Built for ghostty on OSX, might work with other things, idk, I haven't tested it.
 
