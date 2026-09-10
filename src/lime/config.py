@@ -20,6 +20,7 @@ class Settings:
     heading_labels: bool = True
     mermaid: str = "auto"
     images: bool = True
+    interactive: str = "auto"
     font: str | None = None
 
 
@@ -58,7 +59,11 @@ def load_settings(path: Path | None = None) -> Settings:
     for key in ("line_numbers", "heading_labels", "images"):
         if key in values and type(values[key]) is not bool:
             raise ValueError(f"{key} must be true or false")
-    for key, options in (("headings", ("auto", "image", "text")), ("mermaid", ("auto", "off"))):
+    for key, options in (
+        ("headings", ("auto", "image", "text")),
+        ("mermaid", ("auto", "off")),
+        ("interactive", ("auto", "on", "off")),
+    ):
         if key in values and values[key] not in options:
             raise ValueError(f"{key} must be one of {', '.join(options)}")
     if values.get("font") is not None:

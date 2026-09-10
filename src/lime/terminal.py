@@ -76,6 +76,40 @@ def read_palette(fd: int, timeout: float = 0.3) -> TerminalTheme | None:
     return None
 
 
+def sync(fd: int, timeout: float = 0.25) -> bool:
+    """Wait until the terminal has parsed everything written before this call.
+
+    A Device Status Report is answered in order, so its reply cannot arrive
+    until the emulator has consumed the bytes that preceded it. Printing a long
+    document leaves Ghostty parsing for a while, and a title set at the end of
+    it is not visible to AppleScript until that backlog clears.
+    """
+    original = termios.tcgetattr(fd)
+    settings = termios.tcgetattr(fd)
+    settings[3] &= ~(termios.ICANON | termios.ECHO)
+    settings[6][termios.VMIN] = 0
+    settings[6][termios.VTIME] = 0
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, settings)
+        os.write(fd, b"\x1b[5n")
+        deadline = time.monotonic() + timeout
+        data = b""
+        while time.monotonic() < deadline and len(data) < 256:
+            if not select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
+                break
+            chunk = os.read(fd, 64)
+            if not chunk:
+                break
+            data += chunk
+            if b"\x1b[0n" in data:
+                return True
+    except OSError:
+        return False
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, original)
+    return False
+
+
 def query_palette() -> TerminalTheme | None:
     try:
         fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)

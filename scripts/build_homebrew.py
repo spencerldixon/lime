@@ -87,7 +87,7 @@ def main():
         "      print('works')\n"
         "      ```\n"
         "    MARKDOWN\n"
-        '    output = shell_output("#{bin}/lime --plain #{testpath}/sample.md")\n'
+        '    output = shell_output("#{bin}/lime #{testpath}/sample.md")\n'
         "    assert_match 'Hello from lime', output\n"
         "    assert_match '42', output\n"
         "    assert_match \"print('works')\", output\n"

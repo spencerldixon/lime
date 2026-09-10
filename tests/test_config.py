@@ -1,5 +1,5 @@
 import pytest
-from test_cli import run
+from test_cli import configured, run
 
 from lime.config import Settings, load_settings
 
@@ -41,16 +41,38 @@ def test_invalid_config_is_rejected(tmp_path, yaml):
         load_settings(config)
 
 
-def test_cli_can_override_config(tmp_path):
-    config = tmp_path / "config.yaml"
-    config.write_text("line_numbers: false\n")
+def test_the_config_file_drives_rendering(tmp_path):
     source = "```python\nprint('hi')\n```"
-    configured = run("--config", str(config), "-", source=source)
-    overridden = run("--config", str(config), "--line-numbers", "-", source=source)
-    assert "1 " not in configured.stdout
-    assert "1 " in overridden.stdout
+    numbered = run("-", source=source, env={"XDG_CONFIG_HOME": configured(tmp_path, "")})
+    plain = run(
+        "-", source=source, env={"XDG_CONFIG_HOME": configured(tmp_path, "line_numbers: false\n")}
+    )
+    assert "1 " in numbered.stdout
+    assert "1 " not in plain.stdout
 
 
-def test_explicit_missing_config_reports_error(tmp_path):
-    result = run("--config", str(tmp_path / "missing.yaml"), "-", source="# Hi")
-    assert result.returncode == 1 and "cannot read config" in result.stderr
+def test_a_broken_config_file_reports_an_error(tmp_path):
+    result = run(
+        "-", source="# Hi", env={"XDG_CONFIG_HOME": configured(tmp_path, "headings: nonsense\n")}
+    )
+    assert result.returncode == 1 and "headings" in result.stderr
+
+
+def test_interactive_defaults_to_auto():
+    settings = load_settings()
+    assert settings.interactive == "auto"
+
+
+@pytest.mark.parametrize("key, value", [("interactive", "sometimes")])
+def test_invalid_choice_is_rejected(tmp_path, key, value):
+    path = tmp_path / "config.yaml"
+    path.write_text(f"{key}: {value}\n")
+    with pytest.raises(ValueError, match=key):
+        load_settings(path)
+
+
+def test_valid_choices_are_accepted(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("interactive: 'off'\n")
+    settings = load_settings(path)
+    assert settings.interactive == "off"

@@ -19,7 +19,17 @@ from rich.text import Text
 from rich.theme import Theme
 
 from lime.graphics import Headings
+from lime.outline import Section, heading_text, outline
 from lime.terminal import clean_text
+
+# OSC 133;A marks the row as a prompt so Ghostty's jump_to_prompt can reach it.
+# It must be followed by 133;D, not 133;C: at column zero 133;C triggers a
+# fish-specific "un-prompt" heuristic that erases the mark we just set, leaving
+# every jump to land on the shell's own prompt instead. 133;D (end command)
+# only returns the cursor to output state, which stops the prompt semantic from
+# bleeding onto the rows that follow.
+MARK = "\x1b]133;A\x1b\\"
+END_MARK = MARK + "\x1b]133;D\x1b\\"
 
 
 class TextHeading(Heading):
@@ -136,17 +146,6 @@ def prepare(tokens: list[Token], base: Path) -> None:
             prepare(token.children, base)
 
 
-def heading_text(token: Token) -> str:
-    return "".join(
-        heading_text(child)
-        if child.children
-        else " "
-        if child.type in {"softbreak", "hardbreak"}
-        else child.content
-        for child in token.children or []
-    )
-
-
 def markdown_theme() -> Theme:
     return Theme(
         {
@@ -173,9 +172,11 @@ def render(
     headings: Headings | None = None,
     heading_labels: bool = True,
     line_numbers: bool = True,
+    marks: bool = False,
     mermaid=None,
     images=None,
-) -> None:
+) -> list[Section]:
+    marks = marks and console.is_terminal and console.color_system is not None
     document = Document(
         clean_text(source),
         code_theme="ansi_light",
@@ -184,16 +185,36 @@ def render(
     )
     prepare(document.parsed, base)
     tokens = document.parsed
+    sections = outline(tokens)
 
     def emit(batch: list[Token]) -> None:
         if batch:
             document.parsed = batch
             console.print(Padding(document, (0, margin)), highlight=False)
 
+    def mark() -> None:
+        # Each prompt mark sits alone on its own row, before the heading text.
+        # Ghostty keeps a row's prompt flag only when nothing more is written to
+        # that row, so the mark and the heading must not share a line. The flush
+        # keeps the OSC bytes ahead of the Rich-rendered heading that follows.
+        console.file.write(END_MARK + "\n")
+        console.file.flush()
+
     batch: list[Token] = []
     index = 0
+    if marks:
+        # Mark 0 is the document start, so lime can always open at the first
+        # character even when there are no headings at all. Mark i + 1 is the
+        # heading at outline index i, so total marks == len(sections) + 1.
+        mark()
     while index < len(tokens):
         token = tokens[index]
+        if marks and token.type == "heading_open" and token.level == 0:
+            # Ghostty records a prompt mark here, so its own jump_to_prompt
+            # walks headings. The predicate must match outline() exactly.
+            emit(batch)
+            batch = []
+            mark()
         if (
             images
             and token.type == "paragraph_open"
@@ -249,3 +270,4 @@ def render(
             batch.append(token)
             index += 1
     emit(batch)
+    return sections
