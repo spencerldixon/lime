@@ -15,6 +15,7 @@ Built for Ghostty and macOS, might work with other things, idk, I haven't tested
 - Your terminals native theme
 - Jump between headings with keyboard shortcuts
 - Table of contents navigation
+- Keyboard shortcuts help
 - Native scrollback
 - Native search
 
@@ -81,6 +82,7 @@ lime README.md
 | `t` | Table of contents |
 | `n` / `p` | Next / Previous heading |
 | `g` / `G` | Go to beginning / end of document |
+| `?` | Keyboard shortcuts |
 | `q`, Ctrl-C, Ctrl-D | Quit |
 
 ## How lime works

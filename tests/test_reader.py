@@ -40,9 +40,20 @@ def test_interrupt_quits():
     assert step(IDLE, Key.INTERRUPT, SECTIONS)[1] is Action.QUIT
 
 
-@pytest.mark.parametrize("state", [State("toc"), State("idle")])
+
+def test_question_mark_opens_help():
+    state, action = step(IDLE, "?", SECTIONS)
+    assert state.mode == "help" and action is Action.OPEN
+
+@pytest.mark.parametrize("state", [State("toc"), State("idle"), State("help")])
 def test_ctrl_d_quits_from_every_overlay(state):
     assert step(state, Key.EOF, SECTIONS)[1] is Action.QUIT
+
+
+@pytest.mark.parametrize("key", ["x", Key.ESCAPE, "q"])
+def test_any_key_closes_help(key):
+    state, action = step(State("help"), key, SECTIONS)
+    assert state.mode == "idle" and action is Action.CLOSE
 
 
 def test_g_and_shift_g_scroll():
