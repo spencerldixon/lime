@@ -41,29 +41,3 @@ def outline(tokens: list[Token]) -> list[Section]:
                 )
             )
     return sections
-
-
-def match(query: str, title: str) -> tuple[int, ...] | None:
-    """Character positions of a case-insensitive subsequence, or None."""
-    positions = []
-    haystack = title.casefold()
-    start = 0
-    for character in query.casefold():
-        found = haystack.find(character, start)
-        if found < 0:
-            return None
-        positions.append(found)
-        start = found + 1
-    return tuple(positions)
-
-
-def filtered(
-    sections: list[Section], query: str
-) -> list[tuple[Section, tuple[int, ...]]]:
-    """Sections matching a subsequence query, with match positions per section."""
-    results = []
-    for section in sections:
-        positions = match(query, section.title)
-        if positions is not None:
-            results.append((section, positions))
-    return results

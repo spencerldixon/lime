@@ -10,11 +10,13 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from test_terminal import assert_restored
 
-from lime import reader
-from lime.ghostty import Bridge
+from lime import ghostty, reader
+from lime.ghostty import ATTEMPTS, Bridge
 from lime.keys import Key
 from lime.outline import Section
+from lime.overlay import ENTER, LEAVE
 from lime.reader import Action, State, bar, run, step
+from lime.render import END_MARK
 from lime.terminal import Terminal
 
 SECTIONS = [
@@ -22,18 +24,12 @@ SECTIONS = [
     Section("Configure", 2, 1, 4),
     Section("Inspect", 2, 2, 8),
 ]
-IDLE = State("idle", "", 0, None)
+IDLE = State("idle", 0, None)
 
 
 def test_t_opens_the_table_of_contents():
     state, action = step(IDLE, "t", SECTIONS)
     assert state.mode == "toc" and action is Action.OPEN
-
-
-def test_question_mark_toggles_help():
-    state, _ = step(IDLE, "?", SECTIONS)
-    assert state.mode == "help"
-    assert step(state, "?", SECTIONS)[0].mode == "idle"
 
 
 def test_q_quits_from_idle():
@@ -44,94 +40,108 @@ def test_interrupt_quits():
     assert step(IDLE, Key.INTERRUPT, SECTIONS)[1] is Action.QUIT
 
 
+@pytest.mark.parametrize("state", [State("toc"), State("idle")])
+def test_ctrl_d_quits_from_every_overlay(state):
+    assert step(state, Key.EOF, SECTIONS)[1] is Action.QUIT
+
+
 def test_g_and_shift_g_scroll():
     assert step(IDLE, "g", SECTIONS)[1] is Action.TOP
     assert step(IDLE, "G", SECTIONS)[1] is Action.BOTTOM
 
 
-def test_n_and_p_walk_sections_and_track_position():
+def test_n_and_p_step_between_adjacent_headings():
     state, action = step(IDLE, "n", SECTIONS)
     assert action is Action.JUMP and state.current == 0
-    state, _ = step(state, "n", SECTIONS)
-    assert state.current == 1
-    state, _ = step(state, "p", SECTIONS)
-    assert state.current == 0
+    state, action = step(state, "n", SECTIONS)
+    assert action is Action.JUMP and state.current == 1
+    state, action = step(state, "p", SECTIONS)
+    assert action is Action.JUMP and state.current == 0
+
+
+def test_p_with_no_tracked_position_does_nothing():
+    assert step(IDLE, "p", SECTIONS) == (IDLE, None)
 
 
 def test_n_stops_at_the_last_section():
-    state = State("idle", "", 0, 2)
-    assert step(state, "n", SECTIONS)[0].current == 2
+    state = State("idle", 0, 2)
+    assert step(state, "n", SECTIONS) == (state, None)
 
 
 def test_p_stops_at_the_first_section():
-    state = State("idle", "", 0, 0)
-    assert step(state, "p", SECTIONS)[0].current == 0
+    state = State("idle", 0, 0)
+    assert step(state, "p", SECTIONS) == (state, None)
 
 
-def test_typing_in_the_picker_filters_rather_than_binding_keys():
-    state = State("toc", "", 0, None)
-    for character in "ins":
-        state, _ = step(state, character, SECTIONS)
-    assert state.query == "ins" and state.mode == "toc"
+def test_t_opens_the_contents_on_the_current_heading():
+    state, _ = step(State("idle", 0, 1), "t", SECTIONS)
+    assert state.mode == "toc" and state.selected == 1
 
 
-def test_backspace_edits_the_query():
-    state = State("toc", "ins", 0, None)
-    assert step(state, Key.BACKSPACE, SECTIONS)[0].query == "in"
+def test_t_opens_at_the_top_before_any_jump():
+    assert step(IDLE, "t", SECTIONS)[0].selected == 0
 
 
-def test_arrows_move_the_selection_and_wrap():
-    state = State("toc", "", 0, None)
+def test_arrows_move_the_selection():
+    state = State("toc", 0, None)
     assert step(state, Key.DOWN, SECTIONS)[0].selected == 1
-    assert step(state, Key.UP, SECTIONS)[0].selected == 2
+    assert step(state, Key.UP, SECTIONS)[0].selected == 0
+
+
+def test_j_and_k_move_the_selection():
+    state = State("toc", 0, None)
+    assert step(state, "j", SECTIONS)[0].selected == 1
+    assert step(State("toc", 2, None), "k", SECTIONS)[0].selected == 1
 
 
 def test_ctrl_n_and_ctrl_p_also_move_the_selection():
-    state = State("toc", "", 0, None)
+    state = State("toc", 0, None)
     assert step(state, Key.NEXT, SECTIONS)[0].selected == 1
-    assert step(state, Key.PREVIOUS, SECTIONS)[0].selected == 2
+    assert step(State("toc", 2, None), Key.PREVIOUS, SECTIONS)[0].selected == 1
 
 
-def test_selection_is_clamped_when_the_filter_shrinks_results():
-    state = State("toc", "", 2, None)
-    state, _ = step(state, "z", SECTIONS)  # matches nothing
-    assert state.selected == 0
+def test_the_selection_stops_at_both_ends_rather_than_wrapping():
+    assert step(State("toc", 0, None), Key.UP, SECTIONS)[0].selected == 0
+    assert step(State("toc", 2, None), Key.DOWN, SECTIONS)[0].selected == 2
 
 
-def test_enter_jumps_to_the_filtered_selection_and_closes():
-    state = State("toc", "ins", 1, None)  # Install, Inspect
-    state, action = step(state, Key.ENTER, SECTIONS)
+def test_g_and_shift_g_reach_the_first_and_last_heading():
+    assert step(State("toc", 1, None), "g", SECTIONS)[0].selected == 0
+    assert step(State("toc", 1, None), "G", SECTIONS)[0].selected == 2
+
+
+def test_enter_jumps_to_the_selected_heading_and_closes():
+    state, action = step(State("toc", 2, None), Key.ENTER, SECTIONS)
     assert action is Action.JUMP and state.current == 2 and state.mode == "idle"
 
 
-def test_enter_with_no_matches_does_nothing():
-    state = State("toc", "zzz", 0, None)
-    assert step(state, Key.ENTER, SECTIONS)[1] is None
+def test_enter_in_a_document_without_headings_just_closes():
+    state, action = step(State("toc", 0, None), Key.ENTER, [])
+    assert action is Action.CLOSE and state.mode == "idle"
 
 
 def test_escape_closes_without_moving():
-    state = State("toc", "ins", 1, 0)
-    state, action = step(state, Key.ESCAPE, SECTIONS)
+    state, action = step(State("toc", 1, 0), Key.ESCAPE, SECTIONS)
     assert state.mode == "idle" and state.current == 0 and action is Action.CLOSE
 
 
-def test_q_is_filter_text_inside_the_picker():
-    # q must be filter text inside the picker, not a quit key.
-    state = State("toc", "", 0, None)
-    assert step(state, "q", SECTIONS)[0].query == "q"
+def test_q_and_t_also_close_the_contents():
+    for key in ("q", "t"):
+        state, action = step(State("toc", 1, 0), key, SECTIONS)
+        assert action is Action.CLOSE and state.mode == "idle" and state.current == 0
 
 
 def test_bar_omits_the_section_before_any_jump():
-    assert bar("README.md", SECTIONS, None) == "lime · README.md · ? for keys"
+    assert bar("README.md", SECTIONS, None) == "lime · README.md"
 
 
 def test_bar_names_the_last_jumped_section():
-    assert bar("README.md", SECTIONS, 1) == "lime · README.md · Configure 2/3 · ? for keys"
+    assert bar("README.md", SECTIONS, 1) == "lime · README.md · Configure 2/3"
 
 
 def test_the_bar_claims_no_section_at_the_document_start():
     # The reader opens at the start mark, which is not any section.
-    assert bar("README.md", SECTIONS, None) == "lime · README.md · ? for keys"
+    assert bar("README.md", SECTIONS, None) == "lime · README.md"
 
 
 # --- run(): terminal residency, signal handling and overlay bookkeeping ---
@@ -147,13 +157,14 @@ class FakeRunner:
     def __init__(self, replies):
         self.replies = list(replies)
         self.scripts = []
+        self.closed = False
 
     def __call__(self, script):
         self.scripts.append(script)
         return self.replies.pop(0) if self.replies else "false"
 
     def close(self):
-        pass
+        self.closed = True
 
 
 def open_pty():
@@ -171,6 +182,10 @@ def patch_tty(monkeypatch, slave):
         return os.dup(slave) if path == "/dev/tty" else real_open(path, flags, *rest)
 
     monkeypatch.setattr(reader.os, "open", fake_open)
+    # Nothing is emulating a terminal on the far end of this pty, so neither the
+    # parser barrier nor the discovery retry should spend real time waiting.
+    monkeypatch.setattr(reader, "sync", lambda _fd: True)
+    monkeypatch.setattr(ghostty.time, "sleep", lambda _seconds: None)
 
 
 def wait_until(predicate, timeout=2.0):
@@ -185,17 +200,15 @@ def wait_until(predicate, timeout=2.0):
 def press(master, stream, data, ready, timeout=2.0):
     """Write one keystroke and wait for its distinguishing effect before returning.
 
-    read_key() decodes exactly one event out of whatever a single os.read() call
-    returns, and drops anything left over rather than carrying it to the next
-    call. So a multi-key sequence must never be written faster than run() can
-    consume it, or a keystroke silently vanishes; each key here waits for proof
-    that run() has already processed the previous one.
+    Each key waits for proof that the reader has processed the previous one,
+    keeping these interaction tests deterministic even though the real session
+    reader now retains all bytes from a burst.
     """
     os.write(master, data)
     return wait_until(ready, timeout)
 
 
-def run_with_timeout(seconds, *args):
+def run_with_timeout(seconds, *args, **kwargs):
     """A hard backstop: a real bug in run() fails the test instead of hanging it."""
 
     def alarm(signum, frame):
@@ -204,7 +217,7 @@ def run_with_timeout(seconds, *args):
     previous = signal.signal(signal.SIGALRM, alarm)
     signal.alarm(seconds)
     try:
-        return run(*args)
+        return run(*args, **kwargs)
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
@@ -218,13 +231,14 @@ def test_run_opens_at_the_document_start_before_reading_any_key(monkeypatch):
         monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
         stream = io.StringIO()
         os.write(master, b"q")
-        result = run_with_timeout(5, stream, SECTIONS, "README.md", Terminal(80, 24), "auto")
+        result = run_with_timeout(5, stream, SECTIONS, "README.md", Terminal(80, 24))
         assert result == 0
-        # discover() then the opening jump (scroll_to_bottom, jump_to_prompt) happen
-        # before the loop ever reads a key: 3 headings -> 4 marks, start is mark 0.
-        assert "jump_to_prompt:-4" in runner.scripts[2]
+        # Discovery then the batched opening jump happen before the first key.
+        # The end mark plus blank viewport leaves 5 marks above the anchor.
+        assert "jump_to_prompt:-5" in runner.scripts[1]
+        assert stream.getvalue().index(END_MARK) < stream.getvalue().index("lime · README.md")
         # The opening jump lands nowhere sections-shaped, so the bar stays bare.
-        assert "lime · README.md · ? for keys" in stream.getvalue()
+        assert "lime · README.md" in stream.getvalue()
     finally:
         os.close(master)
         os.close(slave)
@@ -238,56 +252,24 @@ def test_run_opens_at_the_start_mark_with_no_headings(monkeypatch):
         monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
         stream = io.StringIO()
         os.write(master, b"q")
-        result = run_with_timeout(5, stream, [], "README.md", Terminal(80, 24), "auto")
+        result = run_with_timeout(5, stream, [], "README.md", Terminal(80, 24))
         assert result == 0
-        assert "jump_to_prompt:-1" in runner.scripts[2]
+        assert "jump_to_prompt:-2" in runner.scripts[1]
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_run_falls_back_to_reprint_when_the_opening_jump_fails(monkeypatch):
+def test_discovery_failure_does_not_add_blank_native_anchor_rows(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        # Discovery succeeds, but the jump itself fails: the bridge goes dead.
-        runner = FakeRunner(["SURFACE-1", "false"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
-
-        def send():
-            # open help, close help, then quit
-            if not press(master, stream, b"?", lambda: "Keys" in stream.getvalue()):
-                return
-            if not press(master, stream, b"q", lambda: "\r\x1b[J" in stream.getvalue()):
-                return
-            os.write(master, b"q")
-
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            peer = pool.submit(send)
-            result = run_with_timeout(
-                5, stream, SECTIONS, "README.md", Terminal(80, 24), "auto"
-            )
-            peer.result(timeout=5)
-        assert result == 0
-        # The help panel must say so in plain, user-visible text.
-        assert "reprint" in stream.getvalue()
-    finally:
-        os.close(master)
-        os.close(slave)
-
-
-def test_run_skips_discovery_when_configured_to_always_reprint(monkeypatch):
-    master, slave = open_pty()
-    try:
-        patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1"])  # would satisfy discover, but must go unused
+        runner = FakeRunner([""] * (ATTEMPTS + 1))
         monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
         stream = io.StringIO()
         os.write(master, b"q")
-        result = run_with_timeout(5, stream, SECTIONS, "README.md", Terminal(80, 24), "reprint")
-        assert result == 0
-        assert runner.scripts == []
+        assert run_with_timeout(5, stream, SECTIONS, "README.md", Terminal(80, 24)) == 0
+        assert END_MARK not in stream.getvalue()
     finally:
         os.close(master)
         os.close(slave)
@@ -302,10 +284,10 @@ def test_run_restores_terminal_and_title_on_quit(monkeypatch):
         monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
         stream = io.StringIO()
         os.write(master, b"q")
-        result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+        result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
         assert result == 0
         assert_restored(slave, original)
-        assert stream.getvalue().endswith("\x1b]2;doc.md\x1b\\")
+        assert stream.getvalue().endswith("\x1b[23;2t")
     finally:
         os.close(master)
         os.close(slave)
@@ -320,27 +302,27 @@ def test_run_pairs_overlay_open_and_close(monkeypatch):
         stream = io.StringIO()
 
         def send():
-            # open the picker, Escape closes it, then quit
+            # open the contents, Escape closes it, then quit
             if not press(master, stream, b"t", lambda: "\x1b[?2026h" in stream.getvalue()):
                 return
-            if not press(master, stream, b"\x1b", lambda: "\r\x1b[J" in stream.getvalue()):
+            if not press(master, stream, b"\x1b", lambda: LEAVE in stream.getvalue()):
                 return
             os.write(master, b"q")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 0
         output = stream.getvalue()
-        assert "\x1b[?2026h" in output  # the picker frame was drawn
-        assert output.count("\r\x1b[J") == 1  # erase() fired exactly once, on close
+        assert output.count(ENTER) == 1  # the alternate screen was entered once
+        assert output.count(LEAVE) == 1  # and left exactly once, on close
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_run_erases_a_jump_that_closes_the_picker(monkeypatch):
+def test_run_leaves_the_alternate_screen_when_enter_jumps(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
@@ -352,46 +334,87 @@ def test_run_erases_a_jump_that_closes_the_picker(monkeypatch):
             return lambda: stream.getvalue().count("\x1b[?2026h") >= n
 
         def send():
-            # filter to "ins", jump to the first match, then quit
-            for count, key in enumerate((b"t", b"i", b"n", b"s"), start=1):
+            # open the contents, move down twice, jump to that heading, quit
+            for count, key in enumerate((b"t", b"j", b"j"), start=1):
                 if not press(master, stream, key, frames(count)):
                     return
-            if not press(master, stream, b"\r", lambda: "Install 1/3" in stream.getvalue()):
+            if not press(master, stream, b"\r", lambda: "Inspect 3/3" in stream.getvalue()):
                 return
             os.write(master, b"q")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 0
         output = stream.getvalue()
-        assert output.count("\r\x1b[J") == 1
-        assert "lime · doc.md · Install 1/3 · ? for keys" in output
+        assert output.count(LEAVE) == 1
+        assert "lime · doc.md · Inspect 3/3" in output
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_run_reports_a_window_too_short_for_the_overlay(monkeypatch):
+def test_run_re_anchors_every_section_jump(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
+        runner = FakeRunner(["SURFACE-1", *["true"] * 8])
         monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
         stream = io.StringIO()
 
         def send():
-            if not press(master, stream, b"t", lambda: "too short" in stream.getvalue()):
+            if not press(master, stream, b"n", lambda: "Install 1/3" in stream.getvalue()):
+                return
+            if not press(master, stream, b"n", lambda: "Configure 2/3" in stream.getvalue()):
                 return
             os.write(master, b"q")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 8), "auto")
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 0
-        assert "too short" in stream.getvalue()
+        # A relative step would desync whenever the viewport moved behind
+        # lime's back, so every jump re-anchors at the bottom and counts
+        # marks back to the target: 5 marks for 3 sections, start and end.
+        assert "scroll_to_bottom" in runner.scripts[2]
+        assert "jump_to_prompt:-4" in runner.scripts[2]
+        assert "scroll_to_bottom" in runner.scripts[3]
+        assert "jump_to_prompt:-3" in runner.scripts[3]
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_run_jumps_to_the_absolute_mark_after_an_overlay(monkeypatch):
+    master, slave = open_pty()
+    try:
+        patch_tty(monkeypatch, slave)
+        runner = FakeRunner(["SURFACE-1", *["true"] * 8])
+        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
+        stream = io.StringIO()
+
+        def send():
+            if not press(master, stream, b"n", lambda: "Install 1/3" in stream.getvalue()):
+                return
+            if not press(master, stream, b"t", lambda: ENTER in stream.getvalue()):
+                return
+            if not press(master, stream, b"\x1b", lambda: LEAVE in stream.getvalue()):
+                return
+            if not press(master, stream, b"n", lambda: "Configure 2/3" in stream.getvalue()):
+                return
+            os.write(master, b"q")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            peer = pool.submit(send)
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
+            peer.result(timeout=5)
+        assert result == 0
+        # Opening an overlay cannot leave the next jump pointing at the wrong
+        # section: it re-anchors and counts back to section 1 regardless.
+        assert "scroll_to_bottom" in runner.scripts[-1]
+        assert "jump_to_prompt:-3" in runner.scripts[-1]
     finally:
         os.close(master)
         os.close(slave)
@@ -406,7 +429,7 @@ def test_run_restores_the_previous_sigwinch_handler(monkeypatch):
         stream = io.StringIO()
         before = signal.getsignal(signal.SIGWINCH)
         os.write(master, b"q")
-        run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+        run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
         assert signal.getsignal(signal.SIGWINCH) is before
     finally:
         os.close(master)
@@ -430,10 +453,10 @@ def test_resize_redraws_only_while_an_overlay_is_open(monkeypatch):
             # Wait for the *last* write run() makes before it blocks on the
             # first read_key() call (the opening title, after discover() and
             # the opening jump), not just any output: discover() alone writes
-            # the picker-unrelated nonce/lime titles well before the signal
+            # the panel-unrelated nonce/lime titles well before the signal
             # handlers are even installed, which would race a signal sent any
             # earlier and blame normal startup output on resized().
-            if not wait_until(lambda: "? for keys" in stream.getvalue()):
+            if not wait_until(lambda: "lime · doc.md" in stream.getvalue()):
                 return
             baseline = len(stream.getvalue())
             os.kill(os.getpid(), signal.SIGWINCH)  # idle: resized() must no-op
@@ -445,13 +468,13 @@ def test_resize_redraws_only_while_an_overlay_is_open(monkeypatch):
             marker = len(stream.getvalue())
             os.kill(os.getpid(), signal.SIGWINCH)  # toc open: must redraw
             observed["redrew"] = wait_until(lambda: len(stream.getvalue()) > marker)
-            if not press(master, stream, b"\x1b", lambda: "\r\x1b[J" in stream.getvalue()):
+            if not press(master, stream, b"\x1b", lambda: LEAVE in stream.getvalue()):
                 return
             os.write(master, b"q")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 0
         assert observed["idle_growth"] == 0
@@ -472,19 +495,19 @@ def test_sigterm_cleans_up_the_terminal_and_any_open_overlay(monkeypatch):
         stream = io.StringIO()
 
         def send():
-            os.write(master, b"?")  # open help, then leave it open
-            if wait_until(lambda: "Keys" in stream.getvalue()):
+            os.write(master, b"t")  # open the contents, then leave them open
+            if wait_until(lambda: ENTER in stream.getvalue()):
                 os.kill(os.getpid(), signal.SIGTERM)
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 128 + signal.SIGTERM
         assert_restored(slave, original)
         output = stream.getvalue()
-        assert output.count("\r\x1b[J") == 1  # the still-open help panel was erased
-        assert output.endswith("\x1b]2;doc.md\x1b\\")
+        assert output.count(LEAVE) == 1  # the still-open help panel was closed
+        assert output.endswith("\x1b[23;2t")
     finally:
         os.close(master)
         os.close(slave)
@@ -505,7 +528,7 @@ def test_sighup_also_cleans_up(monkeypatch):
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 128 + signal.SIGHUP
         assert_restored(slave, original)
@@ -524,7 +547,7 @@ def test_sigterm_and_sighup_handlers_are_restored_afterwards(monkeypatch):
         before_term = signal.getsignal(signal.SIGTERM)
         before_hup = signal.getsignal(signal.SIGHUP)
         os.write(master, b"q")
-        run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+        run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
         assert signal.getsignal(signal.SIGTERM) is before_term
         assert signal.getsignal(signal.SIGHUP) is before_hup
     finally:
@@ -547,9 +570,9 @@ def test_an_unexpected_exception_still_restores_the_terminal(monkeypatch):
         stream = io.StringIO()
         os.write(master, b"q")
         with pytest.raises(ValueError, match="boom"):
-            run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), "auto")
+            run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
         assert_restored(slave, original)
-        assert stream.getvalue().endswith("\x1b]2;doc.md\x1b\\")
+        assert stream.getvalue().endswith("\x1b[23;2t")
     finally:
         os.close(master)
         os.close(slave)
@@ -562,4 +585,70 @@ def test_missing_controlling_terminal_is_a_quiet_noop(monkeypatch):
         return os.open(path, flags, *rest)
 
     monkeypatch.setattr(reader.os, "open", fake_open)
-    assert run(io.StringIO(), SECTIONS, "doc.md", Terminal(80, 24), "auto") == 0
+    assert run(io.StringIO(), SECTIONS, "doc.md", Terminal(80, 24)) == 0
+
+
+def test_discovery_title_error_still_restores_handlers_and_closes_the_helper(monkeypatch):
+    class FailingStream:
+        writes = 0
+
+        def write(self, _text):
+            self.writes += 1
+            if self.writes > 1:  # title stack save succeeds; discovery title fails
+                raise OSError("output broke")
+
+        def flush(self):
+            pass
+
+    master, slave = open_pty()
+    try:
+        patch_tty(monkeypatch, slave)
+        runner = FakeRunner([])
+        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
+        before = signal.getsignal(signal.SIGWINCH)
+        with pytest.raises(OSError, match="output broke"):
+            run(FailingStream(), SECTIONS, "doc.md", Terminal(80, 24))
+        assert signal.getsignal(signal.SIGWINCH) is before
+        assert runner.closed
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_run_jumps_to_the_document_start_and_end(monkeypatch):
+    # g and G are only covered as pure decisions elsewhere; this pins the jumps
+    # they actually issue, which is where a regression would otherwise hide.
+    master, slave = open_pty()
+    try:
+        patch_tty(monkeypatch, slave)
+        runner = FakeRunner(["SURFACE-1", *["true"] * 8])
+        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
+        stream = io.StringIO()
+
+        def scripts(n):
+            return lambda: len(runner.scripts) >= n
+
+        def send():
+            # discovery and the opening jump are scripts 0 and 1
+            if not press(master, stream, b"n", scripts(3)):
+                return
+            if not press(master, stream, b"g", scripts(4)):
+                return
+            if not press(master, stream, b"G", scripts(5)):
+                return
+            os.write(master, b"q")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            peer = pool.submit(send)
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
+            peer.result(timeout=5)
+        assert result == 0
+        # 3 sections means 5 marks: start, three headings, end.
+        assert "jump_to_prompt:-5" in runner.scripts[1]  # opening, the start mark
+        assert "jump_to_prompt:-4" in runner.scripts[2]  # n, the first heading
+        assert "jump_to_prompt:-5" in runner.scripts[3]  # g, back to the start
+        assert "jump_to_prompt:-1" in runner.scripts[4]  # G, the end mark
+        assert all("scroll_to_bottom" in script for script in runner.scripts[1:5])
+    finally:
+        os.close(master)
+        os.close(slave)

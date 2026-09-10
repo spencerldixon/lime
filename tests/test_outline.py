@@ -1,6 +1,6 @@
 from markdown_it import MarkdownIt
 
-from lime.outline import Section, filtered, match, outline
+from lime.outline import Section, outline
 
 
 def parse(source):
@@ -34,24 +34,3 @@ def test_headings_inside_lists_and_quotes_are_skipped():
 
 def test_document_without_headings():
     assert outline(parse("Just a paragraph.\n")) == []
-
-
-def test_match_returns_positions_of_a_subsequence():
-    assert match("isl", "Installation") == (0, 2, 5)
-
-
-def test_match_is_case_insensitive():
-    assert match("INS", "Installation") == (0, 1, 2)
-
-
-def test_match_rejects_a_non_subsequence():
-    assert match("zz", "Installation") is None
-
-
-def test_empty_query_matches_everything_with_no_highlights():
-    assert match("", "Installation") == ()
-
-
-def test_filtered_keeps_document_order():
-    sections = outline(parse("## Install\n\n## Configure\n\n## Inspect\n"))
-    assert [section.title for section, _ in filtered(sections, "ins")] == ["Install", "Inspect"]

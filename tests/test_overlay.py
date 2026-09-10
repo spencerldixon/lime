@@ -1,116 +1,106 @@
-from lime.outline import Section, filtered
-from lime.overlay import MINIMUM, erase, height, help_text, picker, reserve
+import re
+
+from lime.outline import Section
+from lime.overlay import ENTER, LEAVE, contents, screen, visible_width, window
 
 SECTIONS = [Section("Installation", 2, 0, 0), Section("Install with Homebrew", 3, 1, 4)]
+MANY = [Section(f"Section {n}", 2, n, n) for n in range(50)]
 
 
-def test_height_is_capped_and_floored():
-    assert height(40) == 12
-    assert height(14) == 10
-    assert height(10) == 6
-    assert height(9) == 0
-
-
-def test_minimum_is_six():
-    assert MINIMUM == 6
-
-
-def test_reserve_scrolls_then_returns_to_the_top_of_the_block():
-    assert reserve(6) == "\n" * 6 + "\x1b[6A"
-
-
-def test_erase_clears_to_end_of_screen():
-    assert erase() == "\r\x1b[J"
-
-
-def test_picker_is_wrapped_in_synchronized_output():
-    output = picker(filtered(SECTIONS, ""), 0, "", 50, 40)
-    assert output.startswith("\x1b[?2026h") and output.endswith("\x1b[?2026l")
-
-
-def test_picker_shows_titles_levels_and_query():
-    output = picker(filtered(SECTIONS, "ins"), 0, "ins", 50, 40)
-    assert "ins" in output and "Installation" in output and "H2" in output and "H3" in output
-
-
-def test_picker_marks_the_selected_entry():
-    first = picker(filtered(SECTIONS, ""), 0, "", 50, 40)
-    second = picker(filtered(SECTIONS, ""), 1, "", 50, 40)
-    assert first.index("›") < first.index("Installation")
-    assert second.index("›") > second.index("Installation")
-
-
-def test_picker_indents_by_heading_level():
-    output = picker(filtered(SECTIONS, ""), 0, "", 50, 40)
-    lines = output.splitlines()
-    deep = next(line for line in lines if "Homebrew" in line)
-    shallow = next(line for line in lines if "Installation" in line)
-    assert deep.index("Install with") > shallow.index("Installation")
-
-
-def test_picker_reports_an_empty_result():
-    assert "No matching" in picker([], 0, "zzz", 50, 40)
-
-
-def test_picker_reports_a_document_without_headings():
-    assert "No headings" in picker([], 0, "", 50, 40)
-
-
-def test_picker_returns_nothing_when_the_window_is_too_short():
-    assert picker(filtered(SECTIONS, ""), 0, "", 50, 9) == ""
-
-
-def test_picker_never_exceeds_its_height():
-    # Not splitlines(): the frame contains bare \r characters (cursor moves) in
-    # addition to the \r\n row separators, and splitlines() breaks on both, so
-    # it overcounts rows. split("\r\n") isolates the actual rendered rows.
-    many = [Section(f"Section {n}", 2, n, n) for n in range(50)]
-    output = picker(filtered(many, ""), 0, "", 50, 40)
-    assert len(output.split("\r\n")) <= height(40)
-
-
-def test_picker_scrolls_to_keep_the_selection_visible():
-    many = [Section(f"Section {n}", 2, n, n) for n in range(50)]
-    assert "Section 49" in picker(filtered(many, ""), 49, "", 50, 40)
-
-
-def test_help_lists_lime_and_ghostty_keys():
-    output = help_text(60, 40, None)
-    for key in ("t", "?", "q", "n", "p", "g", "G"):
-        assert key in output
-    assert "⌘F" in output
-
-
-def test_help_explains_a_disabled_jump():
-    assert "reprint" in help_text(60, 40, "reprint")
+def _plain(row: str) -> str:
+    """A rendered row with its SGR removed, so column indexes are real columns."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", row)
 
 
 def _rows(output: str) -> list[str]:
-    """The rendered rows of a frame, stripped of the sync wrapper and cursor moves."""
+    """The rendered rows of a panel, stripped of the sync wrapper and home move."""
     rows = output.split("\r\n")
-    rows[0] = rows[0].removeprefix("\x1b[?2026h\r")
-    rows[-1] = rows[-1].rsplit("\r\x1b[", 1)[0]
+    rows[0] = rows[0].removeprefix("\x1b[?2026h\x1b[H")
+    rows[-1] = rows[-1].removesuffix("\x1b[?2026l")
     return [row.removesuffix("\x1b[K") for row in rows]
 
 
-def test_picker_rows_are_all_the_same_width():
-    # Every row must line up so the box borders form a straight edge, whether the
-    # content is short (padded) or long (truncated) and at any overlay width.
+def test_entering_uses_the_alternate_screen_and_hides_the_cursor():
+    assert ENTER == "\x1b[?1049h\x1b[?25l"
+    assert LEAVE == "\x1b[?25h\x1b[?1049l"
+
+
+def test_screen_paints_from_the_top_left():
+    assert screen(["one"], 3).startswith("\x1b[?2026h\x1b[H")
+
+
+def test_screen_fills_exactly_the_window_height():
+    assert len(_rows(screen(["one", "two"], 6))) == 6
+    assert len(_rows(screen(["one"] * 9, 4))) == 4
+
+
+def test_contents_is_wrapped_in_synchronized_output():
+    output = contents(SECTIONS, 0, 50, 40)
+    assert output.startswith("\x1b[?2026h") and output.endswith("\x1b[?2026l")
+
+
+def test_contents_fills_the_whole_window():
+    assert len(_rows(contents(SECTIONS, 0, 50, 40))) == 40
+    assert len(_rows(contents(MANY, 0, 50, 12))) == 12
+
+
+def test_contents_shows_every_heading_when_they_fit():
+    output = contents(SECTIONS, 0, 50, 40)
+    assert "Installation" in output and "Install with Homebrew" in output
+
+
+def test_contents_highlights_the_selected_row():
+    first = contents(SECTIONS, 0, 50, 40)
+    second = contents(SECTIONS, 1, 50, 40)
+    assert next(row for row in _rows(first) if "Installation" in row).startswith("\x1b[7m")
+    assert next(row for row in _rows(second) if "Homebrew" in row).startswith("\x1b[7m")
+    assert not next(row for row in _rows(second) if "Installation" in row).startswith("\x1b[7m")
+
+
+def test_the_highlight_spans_the_whole_row():
+    row = next(row for row in _rows(contents(SECTIONS, 0, 50, 40)) if "Installation" in row)
+    assert visible_width(row) == 50
+
+
+def test_contents_indents_by_heading_level():
+    rows = _rows(contents(SECTIONS, 0, 50, 40))
+    deep = _plain(next(row for row in rows if "Homebrew" in row))
+    shallow = _plain(next(row for row in rows if "Installation" in row))
+    assert deep.index("Install with") > shallow.index("Installation")
+
+
+def test_indenting_is_relative_to_the_shallowest_heading():
+    # A document whose headings all start at H2 must not be pushed right.
+    rows = _rows(contents([Section("Only", 2, 0, 0)], 0, 50, 40))
+    assert _plain(next(row for row in rows if "Only" in row)).index("Only") == 2
+
+
+def test_contents_reports_a_document_without_headings():
+    assert "No headings" in contents([], 0, 50, 40)
+
+
+def test_contents_scrolls_to_keep_the_selection_visible():
+    assert "Section 49" in contents(MANY, 49, 50, 20)
+    assert "Section 0" in contents(MANY, 0, 50, 20)
+    assert "Section 25" in contents(MANY, 25, 50, 20)
+
+
+def test_window_centres_without_running_past_either_end():
+    assert window(0, 50, 10) == 0
+    assert window(25, 50, 10) == 20
+    assert window(49, 50, 10) == 40
+    assert window(0, 3, 10) == 0  # fewer headings than rows
+
+
+def test_contents_rows_are_all_the_same_width():
     long_title = [Section("A" * 200, 2, 0, 0)]
     for width in (24, 50, 120):
-        for entries, query in (
-            (filtered(SECTIONS, ""), ""),
-            (filtered(SECTIONS, "ins"), "ins"),
-            (filtered(long_title, ""), ""),
-            ([], "z" * 100),
-            ([], ""),
-        ):
-            rows = [row for row in _rows(picker(entries, 0, query, width, 40)) if row]
-            assert len({len(row) for row in rows}) == 1
+        for sections in (SECTIONS, long_title, [], MANY):
+            rows = [row for row in _rows(contents(sections, 0, width, 40)) if row]
+            assert len({visible_width(row) for row in rows}) == 1
 
 
-def test_help_rows_are_all_the_same_width():
-    for width in (24, 60, 120):
-        for jump in (None, "reprint", "x" * 200):
-            rows = [row for row in _rows(help_text(width, 40, jump)) if row]
-            assert len({len(row) for row in rows}) == 1
+def test_contents_never_overflows_a_narrow_terminal_in_display_cells():
+    for width in (5, 10):
+        output = contents([Section("界界界", 2, 0, 0)], 0, width, 10)
+        assert all(visible_width(row) <= width for row in _rows(output))

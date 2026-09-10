@@ -202,3 +202,26 @@ def test_no_start_mark_unless_marks_requested():
     console = Console(file=stream, width=40)
     render("No headings here.\n", console, base=Path.cwd())
     assert MARK not in stream.getvalue()
+
+
+def test_start_and_first_heading_occupy_distinct_prompt_rows():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
+    render("# One\n", console, base=Path.cwd(), marks=True)
+    start, heading, _ = stream.getvalue().split(MARK)
+    assert start == ""
+    assert "\n" in heading
+
+
+def test_prompt_regions_end_before_document_text():
+    stream = io.StringIO()
+    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
+    render("Intro\n\n# One\n\nBody\n", console, base=Path.cwd(), marks=True)
+    output_text = stream.getvalue()
+    assert output_text.count(MARK + "\x1b]133;D\x1b\\") == 2
+
+
+def test_explicit_marks_do_not_escape_into_plain_output():
+    stream = io.StringIO()
+    render("# One\n", Console(file=stream), base=Path.cwd(), marks=True)
+    assert "\x1b" not in stream.getvalue()

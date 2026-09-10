@@ -34,6 +34,86 @@ class Key(StrEnum):
     PREVIOUS = "PREVIOUS"
 
 
+class KeyReader:
+    """Decode one key at a time without dropping bytes from bursty terminals."""
+
+    def __init__(
+        self, fd: int, *, timeout: float = 0.05, wake_fd: int | None = None, chunk_size: int = 64
+    ) -> None:
+        self.fd = fd
+        self.timeout = timeout
+        self.wake_fd = wake_fd
+        self.chunk_size = chunk_size
+        self.buffer = b""
+
+    def read(self) -> Key | str | None:
+        """Wait for a key, retaining unread bytes for the next call.
+
+        A bare Escape is ambiguous with the beginning of a terminal sequence, so
+        only that prefix gets a short bounded wait. Every other idle wait blocks.
+        """
+        while True:
+            event, remainder = decode(self.buffer)
+            ambiguous_escape = event is Key.ESCAPE and self.buffer == b"\x1b"
+            if ambiguous_escape:
+                ready, _, _ = select.select(
+                    [self.fd, *([self.wake_fd] if self.wake_fd is not None else [])],
+                    [],
+                    [],
+                    self.timeout,
+                )
+                if self.wake_fd is not None and self.wake_fd in ready:
+                    return None
+                if not ready:
+                    # Escape is the only partial input with a useful standalone
+                    # meaning. Preserve bytes that followed it for the next event.
+                    self.buffer = remainder if event is Key.ESCAPE else self.buffer[1:]
+                    return Key.ESCAPE
+                chunk = os.read(self.fd, self.chunk_size)
+                if not chunk:
+                    return Key.EOF
+                self.buffer += chunk
+                continue
+            if event is not None:
+                self.buffer = remainder
+                return event
+            if remainder != self.buffer:
+                self.buffer = remainder
+                continue
+            ambiguous_escape = self.buffer.startswith(b"\x1b")
+            if ambiguous_escape:
+                ready, _, _ = select.select(
+                    [self.fd, *([self.wake_fd] if self.wake_fd is not None else [])],
+                    [],
+                    [],
+                    self.timeout,
+                )
+                if self.wake_fd is not None and self.wake_fd in ready:
+                    return None
+                if not ready:
+                    self.buffer = self.buffer[1:]
+                    return Key.ESCAPE
+                chunk = os.read(self.fd, self.chunk_size)
+                if not chunk:
+                    return Key.EOF
+                self.buffer += chunk
+                continue
+            ready, _, _ = select.select(
+                [self.fd, *([self.wake_fd] if self.wake_fd is not None else [])],
+                [],
+                [],
+                None,
+            )
+            if self.wake_fd is not None and self.wake_fd in ready:
+                return None
+            if not ready:
+                continue
+            chunk = os.read(self.fd, self.chunk_size)
+            if not chunk:
+                return Key.EOF
+            self.buffer += chunk
+
+
 def decode(data: bytes) -> tuple[Key | str | None, bytes]:
     """One event off the front of the buffer, with whatever is left over.
 
@@ -69,7 +149,7 @@ def decode(data: bytes) -> tuple[Key | str | None, bytes]:
 def raw_mode(fd: int) -> Iterator[None]:
     original = termios.tcgetattr(fd)
     settings = termios.tcgetattr(fd)
-    settings[3] &= ~(termios.ICANON | termios.ECHO)
+    settings[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
     settings[6][termios.VMIN] = 0
     settings[6][termios.VTIME] = 0
     try:
@@ -80,18 +160,10 @@ def raw_mode(fd: int) -> Iterator[None]:
 
 
 def read_key(fd: int, timeout: float = 0.05) -> Key | str | None:
-    """Block for one event; a partial sequence gets one short extra read."""
-    buffer = b""
-    while True:
-        if not select.select([fd], [], [], None if not buffer else timeout)[0]:
-            return decode(buffer)[0] if buffer else None
-        chunk = os.read(fd, 64)
-        if not chunk:
-            return None
-        buffer += chunk
-        event, remainder = decode(buffer)
-        if event is not None:
-            return event
-        if remainder == buffer:
-            continue
-        buffer = remainder
+    """Read one event compatibly, leaving any burst remainder in the tty queue.
+
+    Resident callers should keep a :class:`KeyReader` for better throughput.
+    """
+    # A one-byte reader makes this stateless wrapper safe for callers that
+    # invoke it repeatedly; the session reader uses a larger read and a buffer.
+    return KeyReader(fd, timeout=timeout, chunk_size=1).read()

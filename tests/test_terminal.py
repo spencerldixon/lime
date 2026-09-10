@@ -1,10 +1,12 @@
 import os
 import select
 import termios
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from lime import terminal
 from lime.terminal import TerminalTheme, read_palette
 
 
@@ -60,6 +62,38 @@ def test_queued_input_is_left_alone():
         assert select.select([slave], [], [], 1)[0]
         assert read_palette(slave) is None
         assert os.read(slave, 1024) == b"next command\n"
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_sync_gives_up_quietly_when_nothing_answers():
+    master, slave = os.openpty()
+    try:
+        original = termios.tcgetattr(slave)
+        assert terminal.sync(slave, timeout=0.05) is False
+        assert_restored(slave, original)  # input flags put back
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_sync_returns_true_once_the_terminal_answers():
+    master, slave = os.openpty()
+    try:
+        os.write(master, b"\x1b[0n")
+        time.sleep(0.05)
+        assert terminal.sync(slave, timeout=0.5) is True
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_sync_asks_with_a_device_status_report():
+    master, slave = os.openpty()
+    try:
+        terminal.sync(slave, timeout=0.05)
+        assert b"\x1b[5n" in os.read(master, 64)
     finally:
         os.close(master)
         os.close(slave)
