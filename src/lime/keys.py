@@ -46,11 +46,13 @@ class KeyReader:
         self.chunk_size = chunk_size
         self.buffer = b""
 
-    def read(self) -> Key | str | None:
+    def read(self, timeout: float | None = None) -> Key | str | None:
         """Wait for a key, retaining unread bytes for the next call.
 
         A bare Escape is ambiguous with the beginning of a terminal sequence, so
-        only that prefix gets a short bounded wait. Every other idle wait blocks.
+        only that prefix gets a short bounded wait. Every other idle wait blocks
+        unless `timeout` is given, in which case an idle wait that long returns
+        None so the caller can act on a pending resize reflow.
         """
         while True:
             event, remainder = decode(self.buffer)
@@ -102,11 +104,13 @@ class KeyReader:
                 [self.fd, *([self.wake_fd] if self.wake_fd is not None else [])],
                 [],
                 [],
-                None,
+                timeout,
             )
             if self.wake_fd is not None and self.wake_fd in ready:
                 return None
             if not ready:
+                if timeout is not None:
+                    return None
                 continue
             chunk = os.read(self.fd, self.chunk_size)
             if not chunk:

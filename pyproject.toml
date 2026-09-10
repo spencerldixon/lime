@@ -12,6 +12,7 @@ license = "MIT"
 dependencies = [
   "markdown-it-py>=3,<5",
   "Pillow>=11,<13",
+  "pyobjc-framework-ScriptingBridge>=10; sys_platform == 'darwin'",
   "rich>=14,<15",
   "ruamel-yaml>=0.19,<0.20",
 ]

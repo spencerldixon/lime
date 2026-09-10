@@ -21,7 +21,7 @@ def run(*args, source=None, env=None):
 
 
 def configured(tmp_path, yaml):
-    """Settings now come only from the config file, so point XDG at one."""
+    """Settings come only from the config file, so point XDG at one."""
     directory = tmp_path / "lime"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "config.yaml").write_text(yaml)
@@ -37,10 +37,10 @@ def test_stdin_is_rendered_and_redirected_output_has_no_escapes():
 
 def test_bom_and_unicode_file(tmp_path):
     document = tmp_path / "café.md"
-    document.write_text("\ufeff# Café\n\nHello.")
+    document.write_text("﻿# Café\n\nHello.")
     result = run(str(document))
     assert result.returncode == 0 and "Café" in result.stdout
-    assert "\ufeff" not in result.stdout
+    assert "﻿" not in result.stdout
 
 
 def test_missing_file_is_a_useful_error(tmp_path):
@@ -61,10 +61,10 @@ def test_empty_document():
     assert result.returncode == 0 and not result.stdout.strip()
 
 
-def test_terminal_padding_surrounds_document(tmp_path, monkeypatch):
+def test_the_document_is_centred_with_vertical_padding(tmp_path, monkeypatch):
     document = tmp_path / "doc.md"
     document.write_text("A simple paragraph.")
-    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "padding: 12\nvertical_padding: 6\n"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "width: 88\nvertical_padding: 6\n"))
     monkeypatch.setenv("NO_COLOR", "1")
     stream = io.StringIO()
     monkeypatch.setattr("sys.stdout", stream)
@@ -73,7 +73,21 @@ def test_terminal_padding_surrounds_document(tmp_path, monkeypatch):
     lines = stream.getvalue().splitlines()
     assert lines[:6] == [""] * 6 and lines[-6:] == [""] * 6
     body = next(line for line in lines if "paragraph" in line)
-    assert body.startswith(" " * 12) and body.endswith(" " * 12)
+    # margin = (120 - 88) // 2 == 16, on both sides.
+    assert body.startswith(" " * 16) and body.endswith(" " * 16)
+
+
+def test_a_window_narrower_than_the_measure_gets_no_margin(tmp_path, monkeypatch):
+    document = tmp_path / "doc.md"
+    document.write_text("Text.")
+    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "width: 88\n"))
+    monkeypatch.setenv("NO_COLOR", "1")
+    stream = io.StringIO()
+    monkeypatch.setattr("sys.stdout", stream)
+    monkeypatch.setattr(Terminal, "detect", lambda _: Terminal(columns=40, rows=40, is_tty=True))
+    assert main([str(document)]) == 0
+    body = next(line for line in stream.getvalue().splitlines() if "Text." in line)
+    assert body.startswith("Text.")
 
 
 @pytest.mark.parametrize("multiplexer", ["TMUX", "STY", "ZELLIJ"])
@@ -107,46 +121,46 @@ def test_reader_is_skipped_without_a_tty(tmp_path, monkeypatch):
     assert not called
 
 
-def test_configured_interactive_enters_for_headings_free_document(monkeypatch, tmp_path):
+def test_a_graphics_tty_enters_the_reader_for_a_headings_free_document(monkeypatch):
     called = []
-    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "interactive: on\n"))
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr("lime.cli.read", lambda *a, **k: called.append((a, k)) or 0)
-    monkeypatch.setattr(
-        Terminal, "detect", lambda _: Terminal(columns=80, rows=24, is_tty=True, graphics=False)
-    )
     monkeypatch.setattr("lime.cli.query_palette", lambda: None)
+    monkeypatch.setattr(
+        Terminal, "detect", lambda _: Terminal(columns=80, rows=24, is_tty=True, graphics=True)
+    )
     monkeypatch.setattr("sys.stdin", io.StringIO("A document without headings.\n"))
     assert main(["-"]) == 0
     assert called
 
 
-def test_empty_source_skips_reader_even_when_configured_on(monkeypatch, tmp_path):
+def test_empty_source_skips_the_reader(monkeypatch):
     called = []
-    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "interactive: on\n"))
+    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr("lime.cli.read", lambda *a, **k: called.append((a, k)) or 0)
+    monkeypatch.setattr("lime.cli.query_palette", lambda: None)
     monkeypatch.setattr(
-        Terminal, "detect", lambda _: Terminal(columns=80, rows=24, is_tty=True, graphics=False)
+        Terminal, "detect", lambda _: Terminal(columns=80, rows=24, is_tty=True, graphics=True)
     )
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     assert main(["-"]) == 0
     assert not called
 
 
-def test_stdin_is_named_in_the_reader(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "interactive: on\n"))
+def test_stdin_is_named_in_the_reader(monkeypatch):
     called = []
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr("lime.cli.read", lambda *a, **k: called.append((a, k)) or 0)
+    monkeypatch.setattr("lime.cli.query_palette", lambda: None)
     monkeypatch.setattr(
-        Terminal, "detect", lambda _: Terminal(columns=80, rows=24, is_tty=True, graphics=False)
+        Terminal, "detect", lambda _: Terminal(columns=80, rows=24, is_tty=True, graphics=True)
     )
     monkeypatch.setattr("sys.stdin", io.StringIO("# One\n"))
     assert main(["-"]) == 0
     assert called and called[0][0][2] == "stdin"
 
 
-def test_auto_interactive_requires_graphics_tty(monkeypatch):
+def test_the_reader_needs_a_graphics_tty(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr("lime.cli.query_palette", lambda: None)
     monkeypatch.setattr("lime.cli.read", lambda *a, **k: 0)
@@ -166,9 +180,8 @@ def test_auto_interactive_requires_graphics_tty(monkeypatch):
     assert not called
 
 
-def test_no_color_never_enters_the_reader(monkeypatch, tmp_path):
+def test_no_color_never_enters_the_reader(monkeypatch):
     called = []
-    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "interactive: on\n"))
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setattr("lime.cli.read", lambda *a, **k: called.append(a) or 0)
     monkeypatch.setattr("sys.stdin", io.StringIO("# One\n"))

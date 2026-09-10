@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import signal
-from dataclasses import dataclass, replace
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TextIO
 
@@ -12,8 +14,17 @@ from lime.ghostty import END, START, Bridge, _debug, title
 from lime.keys import Key, KeyReader, raw_mode
 from lime.outline import Section
 from lime.overlay import ENTER, LEAVE, contents, shortcuts
-from lime.render import END_MARK
 from lime.terminal import sync
+
+# A burst of SIGWINCHs (a drag-resize) coalesces into one reflow this long after
+# the last one, so the document is reprinted once rather than on every frame.
+REFLOW_DELAY = 0.15
+
+# Ghostty scrolls its own viewport to the bottom a frame or two after a keypress
+# (its `scroll-to-bottom = keystroke` default), which lands *after* lime's own
+# scroll and undoes it. Re-issuing the scroll a few times over the next ~60ms
+# wins that race; the extra Apple Events cost microseconds each.
+MOVE_SETTLE = (0.015, 0.035, 0.06)
 
 
 class Action(StrEnum):
@@ -28,6 +39,20 @@ class Action(StrEnum):
 
 class Terminated(Exception):
     """Raised from a SIGTERM/SIGHUP handler to unwind the loop and clean up."""
+
+
+@dataclass(frozen=True)
+class Layout:
+    """One rendering of the document: its outline plus where the headings landed.
+
+    `anchors` is the output row of the document start followed by each top-level
+    heading, so ``len(anchors) == len(sections) + 1``. After a resize reflow the
+    reader scrolls to these absolute rows, Ghostty's prompt marks having become
+    unreliable once a CSI 3J cleared the scrollback.
+    """
+
+    sections: list[Section]
+    anchors: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -117,7 +142,14 @@ def draw(
     stream.flush()
 
 
-def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
+def run(
+    stream: TextIO,
+    layout: Layout,
+    name: str,
+    terminal,
+    *,
+    reprint: Callable[[int, int], Layout] | None = None,
+) -> int:
     """Read keys until quit, leaving the tty, title and helper as they were."""
     try:
         fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
@@ -126,10 +158,18 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
 
     bridge: Bridge | None = None
     state = State()
+    sections = layout.sections
+    anchors = list(layout.anchors)
     size = [terminal.columns, terminal.rows]
-    # Rows the document owes the end anchor because the window grew while a
-    # panel covered it; written once the alternate screen is gone.
-    deferred_rows = 0
+    # When the last SIGWINCH landed; the reflow waits out REFLOW_DELAY of quiet.
+    pending_resize: float | None = None
+    # A resize that arrived while a panel covered the document. The reflow is
+    # held back until the panel closes and the document is on screen again.
+    document_stale = False
+    # A jump that must be re-issued to survive Ghostty's post-keystroke
+    # scroll-to-bottom: the target row/sentinel, and the times still to fire.
+    move_target: int | None = None
+    move_at: list[float] = []
     resize_requested = False
     title_saved = False
     wake_read = wake_write = -1
@@ -161,6 +201,59 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
             except BlockingIOError:
                 return
 
+    def relayout() -> None:
+        """Erase the stale document from screen and scrollback, then reprint it.
+
+        A resize rewraps every line and moves the centred margin, so the copy in
+        the scrollback no longer matches. Erasing the screen (2J) and scrollback
+        (3J) first keeps exactly one copy; the reprint reports fresh heading rows.
+        sync() holds the caller off until Ghostty has parsed the whole reprint.
+        """
+        nonlocal anchors
+        if reprint is None:
+            return
+        _debug("relayout | size", size[0], "x", size[1], "| current", state.current)
+        stream.write("\x1b[2J\x1b[3J\x1b[H")
+        stream.flush()
+        anchors = reprint(size[0], size[1]).anchors
+        _debug("relayout done | anchors", anchors)
+        sync(fd)
+
+    def go(target: int) -> bool:
+        """Move Ghostty's viewport to START, END, or a heading (by outline index).
+
+        The document was cleared to the top of the scrollback on the way in, so
+        every heading has a known absolute row: one scroll_to_row lands on it,
+        with none of the anchor-then-walk that a prompt-mark jump needs.
+        """
+        if bridge is None:
+            return False
+        if target == END:
+            landed = bridge.scroll_to_bottom()
+            _debug("go bottom ->", landed)
+            return landed
+        if target == START:
+            row = 0
+        elif 0 <= target < len(sections) and target + 1 < len(anchors):
+            row = anchors[target + 1]
+        else:
+            row = 0
+        landed = bridge.scroll_to_row(row)
+        _debug("go row", row, "->", landed, "| target", target)
+        return landed
+
+    def move(target: int) -> bool:
+        """Jump to a mark, then keep re-asserting it briefly (see MOVE_SETTLE)."""
+        nonlocal move_target, move_at
+        landed = go(target)
+        if landed:
+            move_target = target
+            move_at = [time.monotonic() + delay for delay in MOVE_SETTLE]
+        return landed
+
+    def reposition() -> None:
+        move(START if state.current is None else state.current)
+
     try:
         wake_read, wake_write = os.pipe()
         os.set_blocking(wake_read, False)
@@ -177,41 +270,39 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
         title_saved = True
         bridge = Bridge()
         bridge.discover(stream, settle=lambda: sync(fd))
-        if bridge.available:
-            # The bridge counts prompt marks from the viewport. Keep every
-            # document mark above a fresh full viewport, and create the final
-            # END mark only in a session that can use native movement.
-            stream.write(END_MARK + "\n" * (size[1] + 1))
-            stream.flush()
 
         with raw_mode(fd):
             # Printing ends at the document's foot; open at its head instead.
-            opened_at_start = bridge.jump(START, len(sections))
-            _debug("opening jump ->", opened_at_start, "| sections", len(sections),
-                   "| rows", size[1])
+            opened_at_start = go(START)
+            _debug("opening scroll ->", opened_at_start, "| sections", len(sections),
+                   "| anchors", anchors)
             write_title(state.current)
             reader = KeyReader(fd, wake_fd=wake_read)
             while True:
-                key = reader.read()
+                waits = [REFLOW_DELAY] if pending_resize is not None else []
+                if move_at:
+                    waits.append(max(0.0, move_at[0] - time.monotonic()))
+                key = reader.read(timeout=min(waits) if waits else None)
+                if move_at and time.monotonic() >= move_at[0]:
+                    move_at.pop(0)
+                    if move_target is not None:
+                        go(move_target)
                 if resize_requested:
                     _debug("SIGWINCH")
                     resize_requested = False
                     drain_wakeup()
-                    old_rows = size[1]
                     updated = os.get_terminal_size(fd)
                     size[:] = [updated.columns, updated.lines]
-                    # The end anchor needs a full viewport of unmarked space
-                    # below it. Growing the window otherwise pulls old marks
-                    # into the active page and changes Ghostty's mark count.
-                    growth = max(0, size[1] - old_rows) if bridge.available else 0
+                    pending_resize = time.monotonic()
+                if pending_resize is not None and time.monotonic() - pending_resize >= REFLOW_DELAY:
+                    pending_resize = None
                     if state.mode == "idle":
-                        if growth:
-                            stream.write("\n" * growth)
-                            stream.flush()
+                        relayout()
+                        reposition()
                     else:
-                        # Those rows would land on the alternate screen while a
-                        # panel is open, so the document collects them on close.
-                        deferred_rows += growth
+                        # The document is under the alternate screen; reflow it
+                        # once the panel closes and it is visible again.
+                        document_stale = True
                         redraw()
                 if key is None:
                     continue
@@ -224,25 +315,27 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
                 if action is Action.OPEN:
                     stream.write(ENTER)
                 if action is Action.CLOSE or (action is Action.JUMP and opened != "idle"):
-                    stream.write(LEAVE + "\n" * deferred_rows)
+                    stream.write(LEAVE)
                     stream.flush()
-                    deferred_rows = 0
+                    if document_stale:
+                        document_stale = False
+                        relayout()
                 if action is Action.CLOSE:
                     # Leaving the alternate screen can drop the viewport to the
                     # bottom, so put it back on the heading we were reading.
-                    bridge.jump(START if state.current is None else state.current, len(sections))
+                    reposition()
                 if action in {Action.OPEN, Action.REDRAW}:
                     redraw()
-                if action is Action.TOP and bridge.jump(START, len(sections)):
+                if action is Action.TOP and move(START):
                     state = replace(state, current=None)
                     write_title(None)
-                if action is Action.BOTTOM and bridge.jump(END, len(sections)):
+                if action is Action.BOTTOM and move(END):
                     state = replace(state, current=None)
                     write_title(None)
                 if action is Action.JUMP and state.current is not None:
                     # A refused jump leaves the viewport alone, so the tracked
                     # position must go back to where the document really is.
-                    if bridge.jump(state.current, len(sections)):
+                    if move(state.current):
                         write_title(state.current)
                     else:
                         state = replace(state, current=old_current)

@@ -13,15 +13,7 @@ from ruamel.yaml.error import YAMLError
 @dataclass(frozen=True)
 class Settings:
     width: int = 88
-    padding: int = 12
-    vertical_padding: int = 6
-    line_numbers: bool = True
-    headings: str = "auto"
-    heading_labels: bool = True
-    mermaid: str = "auto"
-    images: bool = True
-    interactive: str = "auto"
-    font: str | None = None
+    vertical_padding: int = 3
 
 
 def config_path() -> Path:
@@ -49,26 +41,10 @@ def load_settings(path: Path | None = None) -> Settings:
         )
     for key, minimum, maximum in (
         ("width", 12, 1000),
-        ("padding", 0, 100),
         ("vertical_padding", 0, 100),
     ):
         if key in values and (
             type(values[key]) is not int or not minimum <= values[key] <= maximum
         ):
             raise ValueError(f"{key} must be an integer between {minimum} and {maximum}")
-    for key in ("line_numbers", "heading_labels", "images"):
-        if key in values and type(values[key]) is not bool:
-            raise ValueError(f"{key} must be true or false")
-    for key, options in (
-        ("headings", ("auto", "image", "text")),
-        ("mermaid", ("auto", "off")),
-        ("interactive", ("auto", "on", "off")),
-    ):
-        if key in values and values[key] not in options:
-            raise ValueError(f"{key} must be one of {', '.join(options)}")
-    if values.get("font") is not None:
-        if not isinstance(values["font"], str):
-            raise ValueError("font must be a path or null")
-        font = Path(values["font"]).expanduser()
-        values["font"] = str(font if font.is_absolute() else path.parent / font)
     return Settings(**values)

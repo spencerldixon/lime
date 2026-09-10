@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, TextIO
 from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
@@ -22,14 +23,34 @@ from lime.graphics import Headings
 from lime.outline import Section, heading_text, outline
 from lime.terminal import clean_text
 
-# OSC 133;A marks the row as a prompt so Ghostty's jump_to_prompt can reach it.
-# It must be followed by 133;D, not 133;C: at column zero 133;C triggers a
-# fish-specific "un-prompt" heuristic that erases the mark we just set, leaving
-# every jump to land on the shell's own prompt instead. 133;D (end command)
-# only returns the cursor to output state, which stops the prompt semantic from
-# bleeding onto the rows that follow.
-MARK = "\x1b]133;A\x1b\\"
-END_MARK = MARK + "\x1b]133;D\x1b\\"
+_VERTICAL = re.compile(r"\x1b\[(\d*)([AB])")
+
+
+class RowCounter:
+    """Wrap a text stream, tracking how far down the terminal cursor has moved.
+
+    Rich emits one newline per visual row and never moves the cursor up; only
+    lime's own image code does, always with a matching ``CSI <n> A``. Counting
+    newlines against those up-moves gives the row each heading is printed at,
+    which is the absolute scrollback row the reader scrolls to.
+    """
+
+    def __init__(self, inner: TextIO) -> None:
+        self._inner = inner
+        self.row = 0
+
+    def write(self, text: str) -> int:
+        self.row += text.count("\n")
+        for digits, direction in _VERTICAL.findall(text):
+            step = int(digits) if digits else 1
+            self.row += step if direction == "B" else -step
+        return self._inner.write(text)
+
+    def flush(self) -> None:
+        self._inner.flush()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
 
 
 class TextHeading(Heading):
@@ -172,11 +193,10 @@ def render(
     headings: Headings | None = None,
     heading_labels: bool = True,
     line_numbers: bool = True,
-    marks: bool = False,
+    anchors: list[int] | None = None,
     mermaid=None,
     images=None,
 ) -> list[Section]:
-    marks = marks and console.is_terminal and console.color_system is not None
     document = Document(
         clean_text(source),
         code_theme="ansi_light",
@@ -192,29 +212,27 @@ def render(
             document.parsed = batch
             console.print(Padding(document, (0, margin)), highlight=False)
 
-    def mark() -> None:
-        # Each prompt mark sits alone on its own row, before the heading text.
-        # Ghostty keeps a row's prompt flag only when nothing more is written to
-        # that row, so the mark and the heading must not share a line. The flush
-        # keeps the OSC bytes ahead of the Rich-rendered heading that follows.
-        console.file.write(END_MARK + "\n")
-        console.file.flush()
+    def record() -> None:
+        # Called at the document start and before each top-level heading, in the
+        # same order as outline(); `anchors` collects the output row of each so
+        # the reader can scroll_to_row(anchors[n]) to reach heading n - 1.
+        if anchors is not None:
+            anchors.append(getattr(console.file, "row", 0))
 
     batch: list[Token] = []
     index = 0
-    if marks:
-        # Mark 0 is the document start, so lime can always open at the first
-        # character even when there are no headings at all. Mark i + 1 is the
-        # heading at outline index i, so total marks == len(sections) + 1.
-        mark()
+    if anchors is not None:
+        # Anchor 0 is the document start, so lime can always open at the first
+        # character even with no headings at all. The nth that follows is the
+        # heading at outline index n - 1.
+        record()
     while index < len(tokens):
         token = tokens[index]
-        if marks and token.type == "heading_open" and token.level == 0:
-            # Ghostty records a prompt mark here, so its own jump_to_prompt
-            # walks headings. The predicate must match outline() exactly.
+        if anchors is not None and token.type == "heading_open" and token.level == 0:
+            # The predicate must match outline() exactly.
             emit(batch)
             batch = []
-            mark()
+            record()
         if (
             images
             and token.type == "paragraph_open"

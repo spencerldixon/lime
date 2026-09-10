@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import os
 import secrets
-import shutil
-import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -20,30 +18,12 @@ def _debug(*parts: object) -> None:
     if _DEBUG:
         print("[lime]", *parts, file=sys.stderr, flush=True)
 
+
 ATTEMPTS = 3
 DELAY = 0.08
 START = -1
 END = -2
-FIND = """
-tell application "Ghostty"
-  repeat with s in terminals
-    if name of s is "{nonce}" then return id of s
-  end repeat
-end tell
-return ""
-"""
-FOCUSED = """
-tell application "Ghostty"
-  return id of focused terminal of selected tab of front window
-end tell
-"""
-ACT = """
-tell application "Ghostty"
-  set s to first terminal whose id is "{surface}"
-  {commands}
-  return true
-end tell
-"""
+BUNDLE_ID = "com.mitchellh.ghostty"
 
 
 def title(text: str) -> str:
@@ -51,43 +31,35 @@ def title(text: str) -> str:
     return f"\x1b]2;{clean_text(text).replace(chr(10), '')}\x1b\\"
 
 
-def jump_actions(index: int, total: int) -> list[str]:
-    """Anchor at the bottom, then walk back to one mark; total counts headings.
+def ghostty_app() -> object | None:
+    """A ScriptingBridge handle to Ghostty, or None where scripting is unavailable.
 
-    Marks are 0 for the start, i + 1 for heading i, and n + 1 for the end.
-    The CLI reserves a blank viewport after the end before entering the reader.
-    Anchoring first makes the walk independent of manual scrolling.
+    Apple Events dispatched through this handle cost well under a millisecond, so
+    a jump lands in the same frame as the keypress -- unlike shelling out to
+    osascript per move, which was slow enough for Ghostty's own
+    scroll-to-bottom-on-keystroke to flash first.
     """
-    # The CLI adds an end mark and a blank viewport, keeping every mark above
-    # the bottom viewport's first row, where Ghostty begins counting upwards.
-    marks = total + 2
-    mark = total + 1 if index == END else 0 if index == START else index + 1
-    return ["scroll_to_bottom", f"jump_to_prompt:-{marks - mark}"]
-
-
-def osascript(script: str) -> str:
     try:
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=2, check=False
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        _debug("osascript raised:", error)
-        return ""
-    out = result.stdout.strip()
-    _debug(f"osascript rc={result.returncode} out={out!r} err={result.stderr.strip()!r}")
-    return out if result.returncode == 0 else ""
+        from ScriptingBridge import SBApplication
+    except ImportError:
+        return None
+    return SBApplication.applicationWithBundleIdentifier_(BUNDLE_ID)
+
+
+_AUTODETECT = object()
 
 
 class Bridge:
     """A live handle to this session's Ghostty surface, or a permanently dead one."""
 
-    def __init__(self, runner=None) -> None:
-        self.runner = runner or (osascript if shutil.which("osascript") else None)
-        self.surface: str | None = None
+    def __init__(self, app: object | None = _AUTODETECT) -> None:
+        self._app = ghostty_app() if app is _AUTODETECT else app
+        self.surface: object | None = None
+        _debug("Bridge app ->", self._app)
 
     @property
     def available(self) -> bool:
-        return bool(self.surface)
+        return self.surface is not None
 
     def discover(
         self,
@@ -97,10 +69,11 @@ class Bridge:
     ) -> bool:
         """Name this surface uniquely, find it by that name, then rename it.
 
-        Writing the title is not enough: AppleScript reads Ghostty's state, not
+        Writing the title is not enough: scripting reads Ghostty's UI state, not
         the pty, so the query has to wait until the emulator has caught up.
         """
-        if self.runner is None:
+        if self._app is None:
+            _debug("discover -> no Ghostty scripting handle (pyobjc missing?)")
             return False
         nonce = f"lime-{secrets.token_hex(8)}"
         stream.write(title(nonce))
@@ -109,11 +82,11 @@ class Bridge:
             _debug("settle ->", settle())
         try:
             # Settling only proves Ghostty's parser consumed the title. The name
-            # AppleScript reads is updated a beat later by the UI, so the query
-            # itself is the only thing that can observe the rename landing.
+            # the UI reports is updated a beat later, so the query itself is the
+            # only thing that can observe the rename landing.
             for attempt in range(ATTEMPTS):
-                surface = self.runner(FIND.format(nonce=nonce))
-                if surface:
+                surface = self._named(nonce)
+                if surface is not None:
                     break
                 _debug("discovery attempt", attempt + 1, "found nothing")
                 pause(DELAY)
@@ -122,14 +95,36 @@ class Bridge:
                 # or another TUI can overwrite the nonce before Ghostty is asked
                 # about it. Discovery runs at startup, right after the user
                 # launched lime, so the focused surface is this one.
-                surface = self.runner(FOCUSED)
-                _debug("rename went unseen; focused surface ->", surface or "(none)")
+                surface = self._focused()
+                _debug("rename went unseen; focused surface ->", _surface_id(surface))
         finally:
             stream.write(title("lime"))
             stream.flush()
-        self.surface = surface or None
-        _debug("discover ->", "surface", self.surface or "(none, jumping disabled)")
+        self.surface = surface
+        _debug("discover ->", "surface", _surface_id(self.surface) or "(none, jumping disabled)")
         return self.available
+
+    def _named(self, nonce: str) -> object | None:
+        try:
+            found = [(terminal, terminal.name()) for terminal in self._app.terminals()]
+        except Exception as error:  # noqa: BLE001 - Ghostty may have quit
+            _debug("terminal scan raised:", error)
+            return None
+        _debug("terminals seen:", [name for _t, name in found], "| want", nonce)
+        for terminal, name in found:
+            if name == nonce:
+                return terminal
+        return None
+
+    def _focused(self) -> object | None:
+        try:
+            for window in self._app.windows():
+                terminal = window.selectedTab().focusedTerminal()
+                if terminal is not None:
+                    return terminal
+        except Exception as error:  # noqa: BLE001 - Ghostty may have quit
+            _debug("focused lookup raised:", error)
+        return None
 
     def perform(self, action: str) -> bool:
         return self.perform_actions([action])
@@ -139,19 +134,40 @@ class Bridge:
         if not self.available:
             _debug("perform_actions", actions, "-> skipped (bridge unavailable)")
             return False
-        commands = "\n  ".join(
-            f'if not (perform action "{action}" on s) then return false'
-            for action in actions
-        )
-        _debug("perform_actions", actions)
         # A refused action is not fatal: Ghostty rejects scrolling while the
         # alternate screen is up, for instance, and the next key should still
         # work. There is no second way to move the viewport to fall back to.
-        return self.runner(ACT.format(surface=self.surface, commands=commands)) == "true"
+        try:
+            for action in actions:
+                ok = self._app.performAction_on_(action, self.surface)
+                _debug("performAction", action, "->", ok)
+                if not ok:
+                    return False
+        except Exception as error:  # noqa: BLE001 - Ghostty may have quit
+            _debug("perform_actions raised:", error)
+            return False
+        return True
 
-    def jump(self, index: int, total: int) -> bool:
-        return self.perform_actions(jump_actions(index, total))
+    def scroll_to_row(self, row: int) -> bool:
+        """Scroll so the given absolute scrollback row sits at the viewport top.
+
+        The reader has cleared the scrollback (CSI 3J) so the document starts at
+        row 0; an absolute row lands on a heading in one motion, where Ghostty's
+        jump_to_prompt would need a fragile prompt-mark count from an anchor.
+        """
+        return self.perform_actions([f"scroll_to_row:{max(0, row)}"])
+
+    def scroll_to_bottom(self) -> bool:
+        return self.perform("scroll_to_bottom")
 
     def close(self) -> None:
-        if self.runner is not None and hasattr(self.runner, "close"):
-            self.runner.close()
+        self.surface = None
+
+
+def _surface_id(surface: object | None) -> str | None:
+    if surface is None:
+        return None
+    try:
+        return surface.id()
+    except Exception:  # noqa: BLE001 - a stale handle
+        return None
