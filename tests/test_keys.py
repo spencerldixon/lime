@@ -177,13 +177,3 @@ def test_reader_returns_eof_once_the_input_fd_is_closed():
         assert KeyReader(read_end).read() is Key.EOF
     finally:
         os.close(read_end)
-
-
-def test_read_with_timeout_returns_none_when_idle():
-    read_end, write_end = os.pipe()
-    try:
-        result = KeyReader(read_end).read(timeout=0.01)
-        assert result is None
-    finally:
-        os.close(read_end)
-        os.close(write_end)

@@ -51,7 +51,8 @@ class KeyReader:
 
         A bare Escape is ambiguous with the beginning of a terminal sequence, so
         only that prefix gets a short bounded wait. Every other idle wait blocks
-        unless timeout is provided.
+        unless `timeout` is given, in which case an idle wait that long returns
+        None so the caller can act on a pending resize reflow.
         """
         while True:
             event, remainder = decode(self.buffer)

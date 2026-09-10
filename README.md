@@ -40,9 +40,9 @@ you already have.
 
 ### Allow it to control Ghostty
 
-The first time you press a navigation key, macOS asks whether to allow
-controlling Ghostty. **Say yes.** Moving between headings works by asking
-Ghostty to scroll its own viewport, which goes through macOS automation using osascript.
+The first time you run lime, macOS asks whether to allow it to control Ghostty.
+**Say yes.** Moving between headings works by asking Ghostty to scroll its own
+viewport, over the Apple Events automation link.
 
 If you dismiss that prompt, the document still renders and scrolls by hand, but
 `t`, `n`, `p`, `g` and `G` will silently do nothing, which looks like the keys
@@ -84,7 +84,6 @@ lime README.md
 | `g` / `G` | Go to beginning / end of document |
 | `?` | Keyboard shortcuts |
 | `q`, Ctrl-C, Ctrl-D | Quit |
-| `z` | Toggle zen mode (centred) |
 
 ## How lime works
 
@@ -108,58 +107,59 @@ it. So underneath each one lime also prints a small dim `## Heading` line. That
 line is what ⌘F finds and what you copy. Anything deeper than `###`, and any
 heading nested inside a list or quote, stays ordinary text.
 
-### The document lives in scrollback only once
+### The document lives in the scrollback
 
 Most terminal readers take over the screen using the *alternate screen*, a
 second blank buffer the terminal keeps for full-screen programs. It is why
 quitting `less` makes everything vanish, and why your terminal's own search
 never really applied to what you were reading.
 
-Lime does the opposite. It prints straight into your normal terminal, the same
-way `cat` does. The document simply becomes scrollback: your trackpad scrolls
-it, `⌘F` searches it, selection copies it, and it is all still there after lime
-exits. Lime prints the document exactly once and never reprints part of it, so
-scrollback holds one copy and search results are never duplicated.
+Lime does the opposite. It clears the screen and scrollback once, prints the
+document straight into your normal terminal, and stays out of the alternate
+screen. The document simply becomes scrollback: your trackpad scrolls it, `⌘F`
+searches it, selection copies it, and it is all still there after lime exits.
+Resizing the window reprints it once the drag settles, at the new measure, and
+puts you back on the heading you were reading.
 
-The one exception is the table of contents panel, which does use the alternate screen so
-it can fill the window without shoving your document upwards. Closing it puts
-the screen back untouched and returns you to the heading you were reading, and
-while it is open Ghostty's search applies to the panel rather than the document.
-Resizing redraws an open panel; the document itself reflows when zen mode is toggled on, but remains static otherwise. Zen mode centres content for distraction-free reading.
+The one exception is the table of contents panel, which does use the alternate
+screen so it can fill the window without shoving your document upwards. Closing
+it puts the screen back untouched, and while it is open Ghostty's search applies
+to the panel rather than the document.
 
-### Zen mode
-
-Press `z` to toggle zen mode, which centres the document horizontally for a distraction-free reading experience. Zen mode is configured with `zen: true` in your config file. When zen is active, the document is narrower to provide comfortable line lengths and visual focus on the text.
+The document is printed at a fixed measure (`width`, 88 columns by default) and
+centred in the window, so a wider window adds even margins on both sides rather
+than stretching the text.
 
 ### Jumping between heading sections
 
-Ghostty owns the scrollback, so lime asks Ghostty to move rather than moving any
-text itself.
+Ghostty owns the scrollback, so lime asks Ghostty to move its viewport rather
+than moving any text itself.
 
-Printing ends at the foot of the document, so the first thing lime does is jump
-back to the start bookmark, including any introduction above the first heading.
+Because lime clears the scrollback before printing, the document starts at row 0
+and lime knows the exact row each top-level heading landed on (it counts the
+rows as it prints). A jump is then a `scroll_to_row` to that heading's row —
+Ghostty puts it at the top of the window, with none of the anchor-then-walk a
+prompt-mark jump needs. `g` goes to row 0, `G` scrolls to the foot, and the
+contents panel jumps straight to the chosen heading's row. Headings nested
+inside lists or quotes get no row of their own and are left out of the contents,
+since there is nowhere sensible to jump to.
 
-While printing, lime drops an invisible bookmark on its own row just before
-every top-level heading, plus one at the very start and one at the very end.
-Headings nested inside lists or quotes get no bookmark and are left out of the
-contents, since there is nowhere sensible to jump to.
+Ghostty scrolls its own viewport to the bottom a frame or two after any keypress
+(its `scroll-to-bottom = keystroke` default), at a moment lime cannot predict,
+and that would land after lime's jump and undo it. So lime does not jump once --
+it re-issues the same scroll a handful of times over the next ~60ms, spread out
+so at least one lands after Ghostty's snap and wins. Each is a sub-millisecond
+Apple Event, so the cost is nil. Setting `scroll-to-bottom = no-keystroke` in
+your Ghostty config removes the race, but lime does not need you to.
 
-These are OSC 133 *prompt marks*: the signal a shell emits to say "a prompt
-starts here", which is how ⌘↑ and ⌘↓ jump between commands. Ghostty does not
-mind that lime is not a shell, so the same jumping works on headings, even after
-lime exits.
+An earlier version used Ghostty's `jump_to_prompt` over OSC 133 prompt marks,
+counting bookmarks back from the bottom of the window. That worked until a
+resize: reprinting needs to clear the scrollback, and clearing it leaves
+Ghostty's prompt-mark bookkeeping stale, so the counts drifted. Absolute rows
+have no count to get wrong.
 
-To actually move, lime asks Ghostty over macOS automation to run its own
-`jump_to_prompt` action. Every jump is absolute: scroll to the bottom, then
-count back N bookmarks. Counting from a known place each time means scrolling
-by hand between keypresses cannot leave lime pointing at the wrong heading. An
-earlier version stepped one mark at a time relative to wherever the viewport
-happened to be, and drifted as soon as anything else moved it.
-
-A heading can only sit at the top of the window when there is a screenful of
-content below it, so lime prints one blank screen after the last bookmark to
-make room. That is also what `G` targets. Working out *which* Ghostty window
-lime is running in turns out to be its own small problem, covered below.
+Working out *which* Ghostty window lime is running in turns out to be its own
+small problem, covered below.
 
 The window title shows `lime · DOC.md · Configure 2/3` so you can see where you
 are even when scrolled deep into history, where a status line printed under the
@@ -186,22 +186,22 @@ is why most of the behaviour can be tested without a real terminal at all.
 
 ### When scrolling is unavailable
 
-Moving Ghostty's viewport uses its macOS automation support. To find itself among
-Ghostty's terminals, lime briefly renames its window to a random value and asks
-which terminal carries that name, then restores the title. Anything else that
-owns the title, such as a shell hook or another full-screen program, can overwrite
-that name first; lime then falls back to whichever terminal is focused, which is
-the one it was just launched in. If automation is unavailable or neither approach
-identifies a terminal, the navigation keys do nothing. Lime never reprints a
-section to fake a jump: the document is printed once, and scrollback holds
-exactly one copy of it. The contents panel and search keep working.
+Moving Ghostty's viewport goes through Apple Events, spoken in-process through
+ScriptingBridge (an earlier version shelled out to `osascript` per jump, which
+cost 40-80ms each). To find itself among Ghostty's terminals, lime briefly
+renames its window to a random value and asks which terminal carries that name,
+then restores the title. Anything else that owns the title, such as a shell hook
+or another full-screen program, can overwrite that name first; lime then falls
+back to whichever terminal is focused, which is the one it was just launched in.
+If automation is unavailable or neither approach identifies a terminal, the
+navigation keys do nothing — the document still renders, and your trackpad, ⌘F
+and selection all still work.
 
-Automatic interactive mode requires Ghostty without tmux, screen, or Zellij,
-terminal output, and a controlling terminal for keys. `interactive: on` in the
-configuration forces it in other terminals; `interactive: off` prints and exits.
-Redirected output and `NO_COLOR` always print and exit. Markdown piped **into** lime,
-such as `cat DOC.md | lime -`, can still use the reader when output is a terminal;
-keyboard input comes from the controlling terminal separately.
+Interactive mode requires Ghostty without tmux, screen, or Zellij, terminal
+output, and a controlling terminal for keys. Redirected output and `NO_COLOR`
+always print and exit. Markdown piped **into** lime, such as `cat DOC.md | lime -`,
+can still use the reader when output is a terminal; keyboard input comes from the
+controlling terminal separately.
 
 ## Contributing
 
@@ -225,34 +225,28 @@ but anything touching Ghostty's viewport should be checked by eye in Ghostty.
 
 ## Configuration and spacing
 
-Lime reads `$XDG_CONFIG_HOME/lime/config.yaml`, or `~/.config/lime/config.yaml`.
-It uses the built-in defaults if that file is absent. That file is the only way
-to configure lime: the command takes a document and nothing else. Invalid
-keys/types produce an error. It never reads configuration from a document's
-directory automatically.
+Lime reads `$XDG_CONFIG_HOME/lime/config.yaml`, or `~/.config/lime/config.yaml`,
+and uses the built-in defaults if that file is absent. It is the only way to
+configure lime: the command takes a document and nothing else. Unknown keys or
+wrong types produce an error. Lime never reads configuration from a document's
+directory.
+
+There are two settings, both optional:
 
 ```yaml
-width: 88
-padding: 12
-vertical_padding: 6
-line_numbers: true
-headings: auto
-heading_labels: true
-images: true
-mermaid: auto
-interactive: auto
-zen: false             # Centre content and hide chrome for distraction-free reading
+width: 88             # Content measure in columns
+vertical_padding: 3   # Blank rows above and below the document
 ```
 
-Padding is on **all four sides**: 12 columns left/right and 6 rows top/bottom,
-roughly an inch at typical font sizes. Terminals do not report reliable physical
-inches. Horizontal padding shrinks in narrow splits; vertical padding is capped
-in very short windows. `width` caps content width, with horizontal padding added
-when room permits. Redirected output omits the outer padding.
+The document is rendered at `width` columns and **centred** in the window: a
+wider window adds an equal margin on both sides, a window narrower than `width`
+drops the margin and wraps to fit. `vertical_padding` adds blank rows above and
+below, capped in very short windows. Redirected output omits all of it and wraps
+at `width`.
 
-The [example configuration](config.example.yaml) documents every setting. Code
-line numbers are on by default; `line_numbers: false` disables them. Very narrow
-code blocks omit numbers to preserve room for the source.
+Colours always come from the terminal's theme. Code blocks are numbered (very
+narrow blocks omit the numbers to keep room for the source). Big headings render
+as images in Ghostty and as text elsewhere.
 
 ## Rendering Mermaid diagrams and local images
 
@@ -263,13 +257,12 @@ small core package. Once `mmdc` is on PATH, top-level fenced `mermaid` blocks re
 automatically in Ghostty. Colours are derived from the terminal's foreground,
 background, and accent palette. Explicit styling inside a diagram may override
 those colours. Rendering has a 30-second timeout; missing dependencies, invalid
-syntax, and renderer failures leave the readable source in place. Disable it with
-`mermaid: off` in YAML.
+syntax, and renderer failures leave the readable source in place.
 
 For images, write `![Caption](path/to/image.png)` on its own paragraph. Paths are
 relative to the document. Remote URLs, unsupported formats, missing images, and
 images inside lists/quotes retain their caption/link. PNG/JPEG/WebP files are
-limited to 20 MB and 20 megapixels. `images: false` disables inline images.
+limited to 20 MB and 20 megapixels.
 
 ## Your terminal's theme
 
@@ -292,12 +285,10 @@ cat DOC.md | lime -
 lime DOC.md > rendered.txt
 ```
 
-Lime takes one argument: a document, or `-` for stdin. Everything else lives in
-the [configuration file](config.example.yaml). `headings: image` enables graphics
-attempts in a TTY when automatic Ghostty detection is unavailable, such as some
-SSH sessions. It still requires a successful palette query. Redirected output and
-`NO_COLOR` always disable images and styling. Automatic graphics are disabled
-inside tmux, screen, and Zellij; use lime directly in Ghostty for image headings.
+Lime takes one argument: a document, or `-` for stdin. Image headings need
+Ghostty and a successful palette query; they are disabled inside tmux, screen,
+and Zellij, and under redirected output or `NO_COLOR`. Elsewhere headings fall
+back to text.
 
 ## Limits and design choices
 
@@ -308,12 +299,11 @@ characters. Ghostty's [OSC 66 text-sizing issue](https://github.com/ghostty-org/
 is still open as checked on 9 September 2026. The small heading labels are what
 make those titles searchable and copyable today.
 
-Layout is calculated when the command runs. Resize a split and rerun the command
-to reflow tables and image headings. Ghostty's configured scrollback and image
-storage limits apply, so exceptionally long documents can lose older content.
-The heading font uses Helvetica Neue on macOS, common system fonts on Linux, or
-Pillow's fallback. Set `font:` for documents that need additional glyph coverage.
-This release does not automatically discover Ghostty's configured font.
+Lime clears the scrollback when it starts and again on every resize reprint, so
+whatever was in the terminal above it is gone. Ghostty's configured scrollback
+and image storage limits apply, so exceptionally long documents can lose older
+content. The heading font uses Helvetica Neue on macOS, common system fonts on
+Linux, or Pillow's fallback, and is not configurable in this release.
 
 HTML layout, LaTeX, remote image downloads, live refresh, and section paging are
 outside v0.1. Raw HTML is displayed literally. Terminal control characters in

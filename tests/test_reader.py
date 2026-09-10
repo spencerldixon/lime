@@ -8,15 +8,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from test_ghostty import FakeGhostty
 from test_terminal import assert_restored
 
 from lime import ghostty, reader
-from lime.ghostty import ATTEMPTS, Bridge
+from lime.ghostty import Bridge
 from lime.keys import Key
 from lime.outline import Section
 from lime.overlay import ENTER, LEAVE
-from lime.reader import Action, State, bar, run, step
-from lime.render import END_MARK
+from lime.reader import Action, Layout, State, bar, run, step
 from lime.terminal import Terminal
 
 SECTIONS = [
@@ -158,24 +158,31 @@ def test_the_bar_claims_no_section_at_the_document_start():
 # --- run(): terminal residency, signal handling and overlay bookkeeping ---
 #
 # run() opens "/dev/tty" itself and always constructs a real Bridge(), so these
-# tests redirect both: /dev/tty onto a pty we control, and Bridge onto a scripted
-# fake that never shells out to osascript.
+# tests redirect both: /dev/tty onto a pty we control, and Bridge onto a fake
+# ScriptingBridge handle that never touches Apple Events.
 
 
-class FakeRunner:
-    """A scripted AppleScript stand-in: never shells out, records every call."""
+def fake_ghostty(monkeypatch, **kwargs):
+    """Wire reader.Bridge to a FakeGhostty. Returns (stream, app); pass the same
+    stream to run()."""
+    stream = io.StringIO()
+    app = FakeGhostty(stream, **kwargs)
+    monkeypatch.setattr(reader, "Bridge", lambda: Bridge(app))
+    return stream, app
 
-    def __init__(self, replies):
-        self.replies = list(replies)
-        self.scripts = []
-        self.closed = False
 
-    def __call__(self, script):
-        self.scripts.append(script)
-        return self.replies.pop(0) if self.replies else "false"
+def moves(app):
+    """Just the action strings from an app's performAction calls, in order."""
+    return [action for action, _surface in app.actions]
 
-    def close(self):
-        self.closed = True
+
+def steps(app):
+    """moves(app) with consecutive repeats (the post-jump settle re-asserts) dropped."""
+    seen = []
+    for action in moves(app):
+        if not seen or seen[-1] != action:
+            seen.append(action)
+    return seen
 
 
 def open_pty():
@@ -221,6 +228,8 @@ def press(master, stream, data, ready, timeout=2.0):
 
 def run_with_timeout(seconds, *args, **kwargs):
     """A hard backstop: a real bug in run() fails the test instead of hanging it."""
+    if len(args) >= 2 and isinstance(args[1], list):
+        args = (args[0], Layout(args[1]), *args[2:])
 
     def alarm(signum, frame):
         raise TimeoutError("run() did not return before the test's safety timeout")
@@ -238,49 +247,42 @@ def test_run_opens_at_the_document_start_before_reading_any_key(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, app = fake_ghostty(monkeypatch)
         os.write(master, b"q")
-        result = run_with_timeout(5, stream, SECTIONS, "README.md", Terminal(80, 24))
+        result = run_with_timeout(5, stream, Layout(SECTIONS, [0, 12, 40, 88]),
+                                  "README.md", Terminal(80, 24))
         assert result == 0
-        # Discovery then the batched opening jump happen before the first key.
-        # The end mark plus blank viewport leaves 5 marks above the anchor.
-        assert "jump_to_prompt:-5" in runner.scripts[1]
-        assert stream.getvalue().index(END_MARK) < stream.getvalue().index("lime · README.md")
-        # The opening jump lands nowhere sections-shaped, so the bar stays bare.
+        # Discovery, then the opening scroll to the document top, before any key.
+        assert moves(app)[0] == "scroll_to_row:0"
+        # The opening scroll lands nowhere sections-shaped, so the bar stays bare.
         assert "lime · README.md" in stream.getvalue()
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_run_opens_at_the_start_mark_with_no_headings(monkeypatch):
+def test_run_opens_at_the_top_with_no_headings(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, app = fake_ghostty(monkeypatch)
         os.write(master, b"q")
-        result = run_with_timeout(5, stream, [], "README.md", Terminal(80, 24))
+        result = run_with_timeout(5, stream, Layout([], [0]), "README.md", Terminal(80, 24))
         assert result == 0
-        assert "jump_to_prompt:-2" in runner.scripts[1]
+        assert moves(app)[0] == "scroll_to_row:0"
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_discovery_failure_does_not_add_blank_native_anchor_rows(monkeypatch):
+def test_discovery_failure_leaves_the_reader_running_without_scrolling(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner([""] * (ATTEMPTS + 1))
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, app = fake_ghostty(monkeypatch, rename_after=99)
         os.write(master, b"q")
         assert run_with_timeout(5, stream, SECTIONS, "README.md", Terminal(80, 24)) == 0
-        assert END_MARK not in stream.getvalue()
+        assert not app.actions
     finally:
         os.close(master)
         os.close(slave)
@@ -291,9 +293,7 @@ def test_run_restores_terminal_and_title_on_quit(monkeypatch):
     original = termios.tcgetattr(slave)
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
         os.write(master, b"q")
         result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
         assert result == 0
@@ -308,9 +308,7 @@ def test_run_pairs_overlay_open_and_close(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
 
         def send():
             # open the contents, Escape closes it, then quit
@@ -337,9 +335,7 @@ def test_run_leaves_the_alternate_screen_when_enter_jumps(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
 
         def frames(n):
             return lambda: stream.getvalue().count("\x1b[?2026h") >= n
@@ -366,13 +362,11 @@ def test_run_leaves_the_alternate_screen_when_enter_jumps(monkeypatch):
         os.close(slave)
 
 
-def test_run_re_anchors_every_section_jump(monkeypatch):
+def test_run_scrolls_to_each_section_row(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", *["true"] * 8])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, app = fake_ghostty(monkeypatch)
 
         def send():
             if not press(master, stream, b"n", lambda: "Install 1/3" in stream.getvalue()):
@@ -383,28 +377,23 @@ def test_run_re_anchors_every_section_jump(monkeypatch):
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
+            result = run_with_timeout(5, stream, Layout(SECTIONS, [0, 12, 40, 88]),
+                                      "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 0
-        # A relative step would desync whenever the viewport moved behind
-        # lime's back, so every jump re-anchors at the bottom and counts
-        # marks back to the target: 5 marks for 3 sections, start and end.
-        assert "scroll_to_bottom" in runner.scripts[2]
-        assert "jump_to_prompt:-4" in runner.scripts[2]
-        assert "scroll_to_bottom" in runner.scripts[3]
-        assert "jump_to_prompt:-3" in runner.scripts[3]
+        # anchors[1] and anchors[2] are section 0 and section 1.
+        assert steps(app)[1] == "scroll_to_row:12"
+        assert steps(app)[2] == "scroll_to_row:40"
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_run_jumps_to_the_absolute_mark_after_an_overlay(monkeypatch):
+def test_a_section_jump_is_correct_after_an_overlay(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", *["true"] * 8])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, app = fake_ghostty(monkeypatch)
 
         def send():
             if not press(master, stream, b"n", lambda: "Install 1/3" in stream.getvalue()):
@@ -419,13 +408,13 @@ def test_run_jumps_to_the_absolute_mark_after_an_overlay(monkeypatch):
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
+            result = run_with_timeout(5, stream, Layout(SECTIONS, [0, 12, 40, 88]),
+                                      "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 0
         # Opening an overlay cannot leave the next jump pointing at the wrong
-        # section: it re-anchors and counts back to section 1 regardless.
-        assert "scroll_to_bottom" in runner.scripts[-1]
-        assert "jump_to_prompt:-3" in runner.scripts[-1]
+        # section: it is still an absolute scroll to section 1's row.
+        assert moves(app)[-1] == "scroll_to_row:40"
     finally:
         os.close(master)
         os.close(slave)
@@ -435,9 +424,7 @@ def test_run_restores_the_previous_sigwinch_handler(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
         before = signal.getsignal(signal.SIGWINCH)
         os.write(master, b"q")
         run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
@@ -451,9 +438,7 @@ def test_resize_redraws_only_while_an_overlay_is_open(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
         observed = {}
 
         def send():
@@ -501,9 +486,7 @@ def test_sigterm_cleans_up_the_terminal_and_any_open_overlay(monkeypatch):
     original = termios.tcgetattr(slave)
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
 
         def send():
             os.write(master, b"t")  # open the contents, then leave them open
@@ -529,9 +512,7 @@ def test_sighup_also_cleans_up(monkeypatch):
     original = termios.tcgetattr(slave)
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
 
         def send():
             if wait_until(lambda: bool(stream.getvalue())):
@@ -552,9 +533,7 @@ def test_sigterm_and_sighup_handlers_are_restored_afterwards(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
         before_term = signal.getsignal(signal.SIGTERM)
         before_hup = signal.getsignal(signal.SIGHUP)
         os.write(master, b"q")
@@ -571,14 +550,12 @@ def test_an_unexpected_exception_still_restores_the_terminal(monkeypatch):
     original = termios.tcgetattr(slave)
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
 
         def boom(state, key, sections):
             raise ValueError("boom")
 
         monkeypatch.setattr(reader, "step", boom)
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
         os.write(master, b"q")
         with pytest.raises(ValueError, match="boom"):
             run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
@@ -599,7 +576,7 @@ def test_missing_controlling_terminal_is_a_quiet_noop(monkeypatch):
     assert run(io.StringIO(), SECTIONS, "doc.md", Terminal(80, 24)) == 0
 
 
-def test_discovery_title_error_still_restores_handlers_and_closes_the_helper(monkeypatch):
+def test_a_write_failure_during_startup_restores_the_signal_handlers(monkeypatch):
     class FailingStream:
         writes = 0
 
@@ -614,139 +591,202 @@ def test_discovery_title_error_still_restores_handlers_and_closes_the_helper(mon
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner([])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
+        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(FakeGhostty(io.StringIO())))
         before = signal.getsignal(signal.SIGWINCH)
         with pytest.raises(OSError, match="output broke"):
-            run(FailingStream(), SECTIONS, "doc.md", Terminal(80, 24))
+            run(FailingStream(), Layout(SECTIONS), "doc.md", Terminal(80, 24))
         assert signal.getsignal(signal.SIGWINCH) is before
-        assert runner.closed
     finally:
         os.close(master)
         os.close(slave)
 
 
 def test_run_jumps_to_the_document_start_and_end(monkeypatch):
-    # g and G are only covered as pure decisions elsewhere; this pins the jumps
+    # g and G are only covered as pure decisions elsewhere; this pins the moves
     # they actually issue, which is where a regression would otherwise hide.
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", *["true"] * 8])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, app = fake_ghostty(monkeypatch)
 
-        def scripts(n):
-            return lambda: len(runner.scripts) >= n
+        def acted(n):
+            return lambda: len(app.actions) >= n
 
         def send():
-            # discovery and the opening jump are scripts 0 and 1
-            if not press(master, stream, b"n", scripts(3)):
+            # the opening scroll is move 1; each key adds one more
+            if not press(master, stream, b"n", acted(2)):
                 return
-            if not press(master, stream, b"g", scripts(4)):
+            if not press(master, stream, b"g", acted(3)):
                 return
-            if not press(master, stream, b"G", scripts(5)):
+            if not press(master, stream, b"G", acted(4)):
                 return
             os.write(master, b"q")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24))
+            result = run_with_timeout(5, stream, Layout(SECTIONS, [0, 7, 20, 55]),
+                                      "doc.md", Terminal(80, 24))
             peer.result(timeout=5)
         assert result == 0
-        # 3 sections means 5 marks: start, three headings, end.
-        assert "jump_to_prompt:-5" in runner.scripts[1]  # opening, the start mark
-        assert "jump_to_prompt:-4" in runner.scripts[2]  # n, the first heading
-        assert "jump_to_prompt:-5" in runner.scripts[3]  # g, back to the start
-        assert "jump_to_prompt:-1" in runner.scripts[4]  # G, the end mark
-        assert all("scroll_to_bottom" in script for script in runner.scripts[1:5])
+        assert steps(app)[0] == "scroll_to_row:0"   # opening, the document top
+        assert steps(app)[1] == "scroll_to_row:7"   # n, section 0's row
+        assert steps(app)[2] == "scroll_to_row:0"   # g, back to the top
+        assert steps(app)[3] == "scroll_to_bottom"  # G, the foot
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_z_toggles_zen_mode():
-    state, action = step(State(mode="idle", selected=0, current=None, zen=False), "z", SECTIONS)
-    assert state.zen is True and action is Action.ZEN
-    state, action = step(state, "z", SECTIONS)
-    assert state.zen is False and action is Action.ZEN
+# --- resize reflow: clear + reprint, then absolute scroll_to_row navigation ---
 
 
-def test_run_accepts_zen_parameter(monkeypatch):
+def _reprinting(stream, sections, anchors=(0, 3, 40, 90)):
+    """A reprint callback that records its calls and marks the stream."""
+    calls = []
+
+    def reprint(columns, rows):
+        calls.append((columns, rows))
+        stream.write("<<REPRINT>>")
+        return Layout(list(sections), list(anchors))
+
+    reprint.calls = calls
+    return reprint
+
+
+def test_a_resize_clears_the_scrollback_and_reprints_once(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
+        stream, _app = fake_ghostty(monkeypatch)
+        reprint = _reprinting(stream, SECTIONS)
 
         def send():
             if not wait_until(lambda: "lime · doc.md" in stream.getvalue()):
+                return
+            os.kill(os.getpid(), signal.SIGWINCH)
+            if not wait_until(lambda: "<<REPRINT>>" in stream.getvalue()):
                 return
             os.write(master, b"q")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), zen=True)
+            result = run_with_timeout(5, stream, Layout(SECTIONS, [0, 3, 40, 90]),
+                                      "doc.md", Terminal(80, 24), reprint=reprint)
             peer.result(timeout=5)
         assert result == 0
+        output = stream.getvalue()
+        assert output.count("<<REPRINT>>") == 1  # a burst coalesces to one reflow
+        assert "\x1b[2J\x1b[3J" in output  # screen + scrollback erased first
+        assert output.index("\x1b[2J\x1b[3J") < output.index("<<REPRINT>>")
+        assert reprint.calls == [(80, 24)]
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_run_accepts_reprint_callback(monkeypatch):
+def test_navigation_after_a_reflow_uses_absolute_rows(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
-        called = []
-
-        def mock_reprint(zen: bool, columns: int, rows: int) -> None:
-            called.append((zen, columns, rows))
+        stream, app = fake_ghostty(monkeypatch)
+        reprint = _reprinting(stream, SECTIONS, anchors=(0, 5, 44, 91))
 
         def send():
             if not wait_until(lambda: "lime · doc.md" in stream.getvalue()):
+                return
+            os.kill(os.getpid(), signal.SIGWINCH)
+            if not wait_until(lambda: "<<REPRINT>>" in stream.getvalue()):
+                return
+            app.actions.clear()
+            if not press(master, stream, b"n", lambda: any("scroll_to_row" in a for a in moves(app))):
+                return
+            os.write(master, b"g")
+            if not wait_until(lambda: sum("scroll_to_row" in a for a in moves(app)) >= 2):
+                return
+            os.write(master, b"G")
+            if not wait_until(lambda: any("scroll_to_bottom" in a for a in moves(app))):
                 return
             os.write(master, b"q")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), zen=False, reprint=mock_reprint)
+            result = run_with_timeout(5, stream, Layout(SECTIONS, [0, 5, 44, 91]),
+                                      "doc.md", Terminal(80, 24), reprint=reprint)
             peer.result(timeout=5)
         assert result == 0
+        joined = "\n".join(moves(app))
+        assert "jump_to_prompt" not in joined  # marks are abandoned after a reflow
+        assert "scroll_to_row:5" in joined  # n -> first heading, at anchor[1]
+        assert "scroll_to_row:0" in joined  # g -> the document top
+        assert "scroll_to_bottom" in joined  # G -> the foot
     finally:
         os.close(master)
         os.close(slave)
 
 
-def test_z_key_triggers_reflow_via_reprint(monkeypatch):
+def test_a_resize_under_a_panel_reflows_when_it_closes(monkeypatch):
     master, slave = open_pty()
     try:
         patch_tty(monkeypatch, slave)
-        runner = FakeRunner(["SURFACE-1", "true", "true"])
-        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
-        stream = io.StringIO()
-        called = []
-
-        def mock_reprint(zen: bool, columns: int, rows: int) -> None:
-            called.append((zen, columns, rows))
+        stream, _app = fake_ghostty(monkeypatch)
+        reprint = _reprinting(stream, SECTIONS)
+        observed = {}
 
         def send():
             if not wait_until(lambda: "lime · doc.md" in stream.getvalue()):
                 return
-            os.write(master, b"z")
-            time.sleep(0.1)
+            os.write(master, b"t")
+            if not wait_until(lambda: ENTER in stream.getvalue()):
+                return
+            marker = len(stream.getvalue())
+            os.kill(os.getpid(), signal.SIGWINCH)
+            if not wait_until(lambda: len(stream.getvalue()) > marker):
+                return
+            observed["reprinted_while_open"] = "<<REPRINT>>" in stream.getvalue()
+            if not press(master, stream, b"\x1b", lambda: LEAVE in stream.getvalue()):
+                return
             os.write(master, b"q")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             peer = pool.submit(send)
-            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), zen=False, reprint=mock_reprint)
+            result = run_with_timeout(5, stream, Layout(SECTIONS, [0, 3, 40, 90]),
+                                      "doc.md", Terminal(80, 24), reprint=reprint)
             peer.result(timeout=5)
         assert result == 0
-        assert called  # reprint was called on z keypress
+        output = stream.getvalue()
+        assert observed["reprinted_while_open"] is False  # deferred while covered
+        assert output.count("<<REPRINT>>") == 1  # then reflowed once, on close
+        assert output.index(LEAVE) < output.index("<<REPRINT>>")
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_a_jump_is_re_asserted_to_survive_ghosttys_scroll_to_bottom(monkeypatch):
+    # Ghostty scrolls to the bottom a frame after a keypress and undoes lime's
+    # jump; lime re-issues the same scroll a few times over the next ~60ms.
+    master, slave = open_pty()
+    try:
+        patch_tty(monkeypatch, slave)
+        stream, app = fake_ghostty(monkeypatch)
+
+        def send():
+            if not wait_until(lambda: "lime · doc.md" in stream.getvalue()):
+                return
+            os.write(master, b"n")
+            # the immediate jump plus its re-asserts all target section 0's row
+            if not wait_until(lambda: moves(app).count("scroll_to_row:7") >= 3):
+                return
+            os.write(master, b"q")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            peer = pool.submit(send)
+            result = run_with_timeout(5, stream, Layout(SECTIONS, [0, 7, 20, 55]),
+                                      "doc.md", Terminal(80, 24))
+            peer.result(timeout=5)
+        assert result == 0
+        assert moves(app).count("scroll_to_row:7") >= 3  # jump + re-asserts
+        assert steps(app) == ["scroll_to_row:0", "scroll_to_row:7"]  # opening, then the jump
     finally:
         os.close(master)
         os.close(slave)

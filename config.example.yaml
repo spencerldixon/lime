@@ -1,16 +1,5 @@
-# Copy to ~/.config/lime/config.yaml, or use lime --config PATH DOC.md.
-# Width is the content width; padding is added on both sides when space allows.
-width: 88
-padding: 12             # Terminal columns, roughly an inch at common font sizes
-vertical_padding: 6    # Blank rows above and below, roughly an inch
-line_numbers: true     # Code-block line numbers
+# Copy to ~/.config/lime/config.yaml (or $XDG_CONFIG_HOME/lime/config.yaml).
+# Both settings are optional; these are the defaults.
 
-# Colours always come from the terminal's theme.
-headings: auto         # auto, image, or text
-heading_labels: true   # Keep enlarged titles searchable in Ghostty
-font: null             # Optional path to a heading TTF/OTF font
-
-mermaid: auto          # Render with mmdc when installed; off shows only source
-images: true           # Local PNG, JPEG, and WebP images; remote images stay links
-interactive: auto      # auto stays open for keys in Ghostty; on, or off
-zen: false             # Centre content and hide chrome for distraction-free reading
+width: 88             # Content width in columns; the document is centred in the window
+vertical_padding: 3   # Blank rows above and below the document

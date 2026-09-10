@@ -10,11 +10,10 @@ from rich.console import Console
 
 from lime.graphics import Headings, encode_png, load_font, wrap_heading
 from lime.outline import Section
-from lime.render import markdown_theme, render
+from lime.render import RowCounter, markdown_theme, render
 from lime.terminal import Terminal
 
 PALETTE = ((100, 180, 80), (80, 180, 180), (100, 140, 220))
-MARK = "\x1b]133;A\x1b\\"
 
 
 def output(source, width=80, graphics=False, labels=True, color=False):
@@ -144,84 +143,31 @@ def test_render_returns_the_outline():
     assert sections == [Section("One", 1, 0, 0), Section("Two", 2, 1, 2)]
 
 
-def test_marks_precede_every_top_level_heading():
+def _anchored(source, width=40):
+    counter = RowCounter(io.StringIO())
+    console = Console(file=counter, width=width, force_terminal=True, color_system="truecolor")
+    anchors: list[int] = []
+    sections = render(source, console, base=Path.cwd(), anchors=anchors)
+    return sections, anchors, counter._inner.getvalue()
+
+
+def test_anchors_are_the_document_start_then_one_per_top_level_heading():
+    sections, anchors, _ = _anchored("# One\n\ntext\n\n## Two\n")
+    assert len(anchors) == len(sections) + 1  # a leading document-start anchor
+    assert anchors == sorted(anchors)  # in reading order
+
+
+def test_a_nested_heading_gets_no_anchor_and_no_outline_entry():
+    sections, anchors, _ = _anchored("- # Nested\n")
+    assert sections == [] and anchors == [0]  # only the document-start anchor
+
+
+def test_a_headingless_document_still_has_the_start_anchor():
+    sections, anchors, _ = _anchored("Just a paragraph, no headings.\n")
+    assert sections == [] and anchors == [0]
+
+
+def test_anchors_add_no_escapes_and_leave_plain_output_clean():
     stream = io.StringIO()
-    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
-    render("# One\n\ntext\n\n## Two\n", console, base=Path.cwd(), marks=True)
-    output_text = stream.getvalue()
-    # One document-start mark plus one per top-level heading (mark 0 = start).
-    assert output_text.count(MARK) == 3
-    assert output_text.index(MARK) < output_text.index("One")
-    assert output_text.index(MARK, output_text.index("One")) < output_text.index("Two")
-
-
-def test_no_marks_unless_requested():
-    stream = io.StringIO()
-    console = Console(file=stream, width=40)
-    render("# One\n", console, base=Path.cwd())
-    assert MARK not in stream.getvalue()
-
-
-def test_nested_headings_get_no_marks_and_no_outline_entry():
-    stream = io.StringIO()
-    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
-    sections = render("- # Nested\n", console, base=Path.cwd(), marks=True)
-    output_text = stream.getvalue()
-    # Only the document-start mark: the nested heading gets no mark of its own.
-    assert sections == [] and output_text.count(MARK) == 1
-
-
-def test_headingless_document_still_gets_a_start_mark():
-    stream = io.StringIO()
-    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
-    sections = render("Just a paragraph, no headings.\n", console, base=Path.cwd(), marks=True)
-    output_text = stream.getvalue()
-    assert sections == []
-    assert output_text.count(MARK) == 1
-    assert output_text.index(MARK) < output_text.index("Just a paragraph")
-
-
-def test_mark_count_is_sections_plus_one_for_the_document_start():
-    stream = io.StringIO()
-    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
-    render("# One\n\n## Two\n", console, base=Path.cwd(), marks=True)
-    assert stream.getvalue().count(MARK) == 3
-
-
-def test_start_mark_precedes_all_content_including_the_first_heading_mark():
-    stream = io.StringIO()
-    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
-    render("# One\n", console, base=Path.cwd(), marks=True)
-    output_text = stream.getvalue()
-    first_mark_end = output_text.index(MARK) + len(MARK)
-    assert output_text.index(MARK, first_mark_end) < output_text.index("One")
-
-
-def test_no_start_mark_unless_marks_requested():
-    stream = io.StringIO()
-    console = Console(file=stream, width=40)
-    render("No headings here.\n", console, base=Path.cwd())
-    assert MARK not in stream.getvalue()
-
-
-def test_start_and_first_heading_occupy_distinct_prompt_rows():
-    stream = io.StringIO()
-    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
-    render("# One\n", console, base=Path.cwd(), marks=True)
-    start, heading, _ = stream.getvalue().split(MARK)
-    assert start == ""
-    assert "\n" in heading
-
-
-def test_prompt_regions_end_before_document_text():
-    stream = io.StringIO()
-    console = Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
-    render("Intro\n\n# One\n\nBody\n", console, base=Path.cwd(), marks=True)
-    output_text = stream.getvalue()
-    assert output_text.count(MARK + "\x1b]133;D\x1b\\") == 2
-
-
-def test_explicit_marks_do_not_escape_into_plain_output():
-    stream = io.StringIO()
-    render("# One\n", Console(file=stream), base=Path.cwd(), marks=True)
-    assert "\x1b" not in stream.getvalue()
+    render("# One\n\nbody\n", Console(file=stream, width=40), base=Path.cwd(), anchors=[])
+    assert "\x1b" not in stream.getvalue()  # nothing is written for an anchor
