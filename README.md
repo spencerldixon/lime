@@ -82,6 +82,7 @@ lime README.md
 | `n` / `p` | Next / Previous heading |
 | `g` / `G` | Go to beginning / end of document |
 | `q`, Ctrl-C, Ctrl-D | Quit |
+| `z` | Toggle zen mode (centred) |
 
 ## How lime works
 
@@ -122,8 +123,11 @@ The one exception is the table of contents panel, which does use the alternate s
 it can fill the window without shoving your document upwards. Closing it puts
 the screen back untouched and returns you to the heading you were reading, and
 while it is open Ghostty's search applies to the panel rather than the document.
-Resizing redraws an open panel; the document itself only reflows if you rerun
-lime.
+Resizing redraws an open panel; the document itself reflows when zen mode is toggled on, but remains static otherwise. Zen mode centres content for distraction-free reading.
+
+### Zen mode
+
+Press `z` to toggle zen mode, which centres the document horizontally for a distraction-free reading experience. Zen mode is configured with `zen: true` in your config file. When zen is active, the document is narrower to provide comfortable line lengths and visual focus on the text.
 
 ### Jumping between heading sections
 
@@ -234,8 +238,8 @@ headings: auto
 heading_labels: true
 images: true
 mermaid: auto
-font: null
 interactive: auto
+zen: false             # Centre content and hide chrome for distraction-free reading
 ```
 
 Padding is on **all four sides**: 12 columns left/right and 6 rows top/bottom,

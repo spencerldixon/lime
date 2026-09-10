@@ -21,6 +21,7 @@ class Settings:
     mermaid: str = "auto"
     images: bool = True
     interactive: str = "auto"
+    zen: bool = False
     font: str | None = None
 
 
@@ -56,7 +57,7 @@ def load_settings(path: Path | None = None) -> Settings:
             type(values[key]) is not int or not minimum <= values[key] <= maximum
         ):
             raise ValueError(f"{key} must be an integer between {minimum} and {maximum}")
-    for key in ("line_numbers", "heading_labels", "images"):
+    for key in ("line_numbers", "heading_labels", "images", "zen"):
         if key in values and type(values[key]) is not bool:
             raise ValueError(f"{key} must be true or false")
     for key, options in (

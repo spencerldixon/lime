@@ -76,6 +76,24 @@ def test_terminal_padding_surrounds_document(tmp_path, monkeypatch):
     assert body.startswith(" " * 12) and body.endswith(" " * 12)
 
 
+def test_zen_mode_centres_content(tmp_path, monkeypatch):
+    document = tmp_path / "doc.md"
+    document.write_text("A simple paragraph.")
+    # With zen enabled and a wide terminal, content should be centred
+    # Terminal width: 120, content width: 88, so margin = (120 - min(88, 120)) // 2 = 16
+    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "width: 88\nzen: true\n"))
+    monkeypatch.setenv("NO_COLOR", "1")
+    stream = io.StringIO()
+    monkeypatch.setattr("sys.stdout", stream)
+    monkeypatch.setattr(Terminal, "detect", lambda _: Terminal(columns=120, rows=40, is_tty=True))
+    assert main([str(document)]) == 0
+    lines = stream.getvalue().splitlines()
+    body = next(line for line in lines if "paragraph" in line)
+    # With zen centring: margin = (120 - 88) // 2 = 16
+    expected_leading_spaces = 16
+    assert body.startswith(" " * expected_leading_spaces)
+
+
 @pytest.mark.parametrize("multiplexer", ["TMUX", "STY", "ZELLIJ"])
 def test_multiplexers_default_to_text(multiplexer):
     master, slave = os.openpty()
@@ -177,3 +195,4 @@ def test_no_color_never_enters_the_reader(monkeypatch, tmp_path):
     )
     assert main(["-"]) == 0
     assert not called
+

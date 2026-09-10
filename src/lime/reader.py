@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import signal
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TextIO
@@ -24,6 +26,7 @@ class Action(StrEnum):
     REDRAW = "REDRAW"
     OPEN = "OPEN"
     CLOSE = "CLOSE"
+    ZEN = "ZEN"
 
 
 class Terminated(Exception):
@@ -35,6 +38,7 @@ class State:
     mode: str = "idle"
     selected: int = 0
     current: int | None = None
+    zen: bool = False
 
 
 def bar(name: str, sections: list[Section], current: int | None) -> str:
@@ -72,6 +76,8 @@ def step(state: State, key: Key | str, sections: list[Section]) -> tuple[State, 
         if not 0 <= target < len(sections):
             return state, None
         return replace(state, current=target), Action.JUMP
+    if key == "z":
+        return replace(state, zen=not state.zen), Action.ZEN
     return state, None
 
 
@@ -111,7 +117,21 @@ def draw(
     stream.flush()
 
 
-def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
+REFLOW_DELAY = 0.15
+
+
+def anchor_end(stream: TextIO, rows: int) -> None:
+    """Write a fresh screenful of blank rows so the end anchor has room."""
+    stream.write("\n" * rows)
+    stream.flush()
+
+
+def relayout(reprint: Callable[[bool, int, int], None] | None, zen: bool, columns: int, rows: int) -> None:
+    """Ask the caller to redraw the document for a new size, if it can."""
+    if reprint is not None:
+        reprint(zen, columns, rows)
+
+def run(stream: TextIO, sections: list[Section], name: str, terminal, *, zen: bool = False, reprint: Callable[[bool, int, int], None] | None = None) -> int:
     """Read keys until quit, leaving the tty, title and helper as they were."""
     try:
         fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
@@ -119,11 +139,11 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
         return 0
 
     bridge: Bridge | None = None
-    state = State()
+    state = State(zen=zen)
     size = [terminal.columns, terminal.rows]
     # Rows the document owes the end anchor because the window grew while a
     # panel covered it; written once the alternate screen is gone.
-    deferred_rows = 0
+    pending_resize: float | None = None
     resize_requested = False
     title_saved = False
     wake_read = wake_write = -1
@@ -186,26 +206,21 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
             write_title(state.current)
             reader = KeyReader(fd, wake_fd=wake_read)
             while True:
-                key = reader.read()
+                timeout = REFLOW_DELAY if pending_resize is not None else None
+                key = reader.read(timeout=timeout)
                 if resize_requested:
                     _debug("SIGWINCH")
                     resize_requested = False
                     drain_wakeup()
-                    old_rows = size[1]
                     updated = os.get_terminal_size(fd)
                     size[:] = [updated.columns, updated.lines]
-                    # The end anchor needs a full viewport of unmarked space
-                    # below it. Growing the window otherwise pulls old marks
-                    # into the active page and changes Ghostty's mark count.
-                    growth = max(0, size[1] - old_rows) if bridge.available else 0
+                    pending_resize = time.monotonic()
+                if pending_resize is not None and time.monotonic() - pending_resize >= REFLOW_DELAY:
+                    pending_resize = None
                     if state.mode == "idle":
-                        if growth:
-                            stream.write("\n" * growth)
-                            stream.flush()
+                        anchor_end(stream, size[1])
+                        relayout(reprint, state.zen, size[0], size[1])
                     else:
-                        # Those rows would land on the alternate screen while a
-                        # panel is open, so the document collects them on close.
-                        deferred_rows += growth
                         redraw()
                 if key is None:
                     continue
@@ -217,14 +232,15 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
                     break
                 if action is Action.OPEN:
                     stream.write(ENTER)
-                if action is Action.CLOSE or (action is Action.JUMP and opened == "toc"):
-                    stream.write(LEAVE + "\n" * deferred_rows)
+                if action is Action.CLOSE or (action is Action.JUMP and opened != "idle"):
+                    stream.write(LEAVE)
                     stream.flush()
-                    deferred_rows = 0
                 if action is Action.CLOSE:
                     # Leaving the alternate screen can drop the viewport to the
                     # bottom, so put it back on the heading we were reading.
                     bridge.jump(START if state.current is None else state.current, len(sections))
+                if action is Action.ZEN:
+                    relayout(reprint, state.zen, size[0], size[1])
                 if action in {Action.OPEN, Action.REDRAW}:
                     redraw()
                 if action is Action.TOP and bridge.jump(START, len(sections)):

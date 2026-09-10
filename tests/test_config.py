@@ -76,3 +76,21 @@ def test_valid_choices_are_accepted(tmp_path):
     path.write_text("interactive: 'off'\n")
     settings = load_settings(path)
     assert settings.interactive == "off"
+
+
+def test_zen_defaults_to_false():
+    assert Settings().zen is False
+
+
+def test_zen_can_be_configured(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("zen: true\n")
+    settings = load_settings(path)
+    assert settings.zen is True
+
+
+def test_zen_must_be_boolean(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("zen: 'true'\n")
+    with pytest.raises(ValueError, match="zen"):
+        load_settings(path)

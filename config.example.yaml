@@ -13,3 +13,4 @@ font: null             # Optional path to a heading TTF/OTF font
 mermaid: auto          # Render with mmdc when installed; off shows only source
 images: true           # Local PNG, JPEG, and WebP images; remote images stay links
 interactive: auto      # auto stays open for keys in Ghostty; on, or off
+zen: false             # Centre content and hide chrome for distraction-free reading

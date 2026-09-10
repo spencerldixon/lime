@@ -652,3 +652,90 @@ def test_run_jumps_to_the_document_start_and_end(monkeypatch):
     finally:
         os.close(master)
         os.close(slave)
+
+
+def test_z_toggles_zen_mode():
+    state, action = step(State(mode="idle", selected=0, current=None, zen=False), "z", SECTIONS)
+    assert state.zen is True and action is Action.ZEN
+    state, action = step(state, "z", SECTIONS)
+    assert state.zen is False and action is Action.ZEN
+
+
+def test_run_accepts_zen_parameter(monkeypatch):
+    master, slave = open_pty()
+    try:
+        patch_tty(monkeypatch, slave)
+        runner = FakeRunner(["SURFACE-1", "true", "true"])
+        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
+        stream = io.StringIO()
+
+        def send():
+            if not wait_until(lambda: "lime · doc.md" in stream.getvalue()):
+                return
+            os.write(master, b"q")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            peer = pool.submit(send)
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), zen=True)
+            peer.result(timeout=5)
+        assert result == 0
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_run_accepts_reprint_callback(monkeypatch):
+    master, slave = open_pty()
+    try:
+        patch_tty(monkeypatch, slave)
+        runner = FakeRunner(["SURFACE-1", "true", "true"])
+        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
+        stream = io.StringIO()
+        called = []
+
+        def mock_reprint(zen: bool, columns: int, rows: int) -> None:
+            called.append((zen, columns, rows))
+
+        def send():
+            if not wait_until(lambda: "lime · doc.md" in stream.getvalue()):
+                return
+            os.write(master, b"q")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            peer = pool.submit(send)
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), zen=False, reprint=mock_reprint)
+            peer.result(timeout=5)
+        assert result == 0
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_z_key_triggers_reflow_via_reprint(monkeypatch):
+    master, slave = open_pty()
+    try:
+        patch_tty(monkeypatch, slave)
+        runner = FakeRunner(["SURFACE-1", "true", "true"])
+        monkeypatch.setattr(reader, "Bridge", lambda: Bridge(runner))
+        stream = io.StringIO()
+        called = []
+
+        def mock_reprint(zen: bool, columns: int, rows: int) -> None:
+            called.append((zen, columns, rows))
+
+        def send():
+            if not wait_until(lambda: "lime · doc.md" in stream.getvalue()):
+                return
+            os.write(master, b"z")
+            time.sleep(0.1)
+            os.write(master, b"q")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            peer = pool.submit(send)
+            result = run_with_timeout(5, stream, SECTIONS, "doc.md", Terminal(80, 24), zen=False, reprint=mock_reprint)
+            peer.result(timeout=5)
+        assert result == 0
+        assert called  # reprint was called on z keypress
+    finally:
+        os.close(master)
+        os.close(slave)
