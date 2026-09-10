@@ -125,6 +125,34 @@ def test_contents_never_overflows_a_narrow_terminal_in_display_cells():
         assert all(visible_width(row) <= width for row in _rows(output))
 
 
+def test_contents_filters_the_rows_to_the_query():
+    output = contents(SECTIONS, 0, 50, 40, "homebrew")
+    assert "Install with Homebrew" in output
+    assert "Installation" not in output
+
+
+def test_contents_shows_the_active_filter_and_its_tally():
+    output = contents(SECTIONS, 0, 50, 40, "install")
+    assert "2/2" in output and "install▏" in output
+
+
+def test_contents_reports_when_nothing_matches_the_query():
+    output = contents(SECTIONS, 0, 50, 40, "zzz")
+    assert 'Nothing matches "zzz"' in output
+    assert "0/2" in output
+
+
+def test_contents_clamps_a_stale_selection_to_the_match_count():
+    rows = _rows(contents(SECTIONS, 5, 50, 40, "homebrew"))
+    assert next(row for row in rows if "Homebrew" in row).startswith("\x1b[7m")
+
+
+def test_a_blank_query_leaves_every_row_and_the_plain_title():
+    output = contents(SECTIONS, 0, 50, 40, "   ")
+    assert "Installation" in output and "Homebrew" in output
+    assert "Contents · 2" in output and "/2" not in output
+
+
 def test_shortcuts_is_wrapped_in_synchronized_output():
     output = shortcuts(50, 40)
     assert output.startswith("\x1b[?2026h") and output.endswith("\x1b[?2026l")

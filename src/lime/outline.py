@@ -27,6 +27,18 @@ def heading_text(token: Token) -> str:
     )
 
 
+def search(sections: list[Section], query: str) -> list[Section]:
+    """Sections whose title contains query, case-insensitively, in outline order.
+
+    An empty or blank query matches everything, so the outline is unfiltered
+    until the reader actually types something.
+    """
+    if not query.strip():
+        return list(sections)
+    needle = query.casefold()
+    return [section for section in sections if needle in section.title.casefold()]
+
+
 def outline(tokens: list[Token]) -> list[Section]:
     """Top-level headings only: exactly those that receive a prompt mark."""
     sections = []

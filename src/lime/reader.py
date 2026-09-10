@@ -12,7 +12,7 @@ from typing import TextIO
 
 from lime.ghostty import END, START, Bridge, _debug, title
 from lime.keys import Key, KeyReader, raw_mode
-from lime.outline import Section
+from lime.outline import Section, search
 from lime.overlay import ENTER, LEAVE, contents, shortcuts
 from lime.terminal import sync
 
@@ -60,6 +60,8 @@ class State:
     mode: str = "idle"
     selected: int = 0
     current: int | None = None
+    # The live filter typed into the table of contents; "" while it is unfiltered.
+    query: str = ""
 
 
 def bar(name: str, sections: list[Section], current: int | None) -> str:
@@ -86,7 +88,7 @@ def step(state: State, key: Key | str, sections: list[Section]) -> tuple[State, 
         # Open on the heading lime last jumped to, so the list starts where the
         # reader is rather than at the top of an unrelated document.
         start = state.current if state.current is not None else 0
-        return replace(state, mode="toc", selected=start), Action.OPEN
+        return replace(state, mode="toc", selected=start, query=""), Action.OPEN
     if key == "g":
         return state, Action.TOP
     if key == "G":
@@ -107,23 +109,31 @@ def step(state: State, key: Key | str, sections: list[Section]) -> tuple[State, 
 def contents_step(
     state: State, key: Key | str, sections: list[Section]
 ) -> tuple[State, Action | None]:
-    """Key handling while the contents are open: move the row, choose, or close."""
-    if key in {Key.ESCAPE, Key.INTERRUPT, "q", "t"}:
-        return replace(state, mode="idle"), Action.CLOSE
+    """Key handling while the contents are open: filter, move the row, choose, close.
+
+    Every printable key narrows the list, so navigation is arrows and Ctrl-N/P
+    only; Esc (or Ctrl-C) closes and drops the filter, Enter jumps to the lit
+    match.
+    """
+    matches = search(sections, state.query)
+    last = max(len(matches) - 1, 0)
+    if key in {Key.ESCAPE, Key.INTERRUPT}:
+        return replace(state, mode="idle", query=""), Action.CLOSE
+    if key is Key.BACKSPACE:
+        if not state.query:
+            return state, None
+        return replace(state, query=state.query[:-1], selected=0), Action.REDRAW
     if key is Key.ENTER:
-        if not sections:
-            return replace(state, mode="idle"), Action.CLOSE
-        return replace(state, mode="idle", current=state.selected), Action.JUMP
-    if not sections:
-        return state, None
-    if key in {Key.DOWN, Key.NEXT, "j"}:
-        return replace(state, selected=min(state.selected + 1, len(sections) - 1)), Action.REDRAW
-    if key in {Key.UP, Key.PREVIOUS, "k"}:
+        if not matches:
+            return replace(state, mode="idle", query=""), Action.CLOSE
+        chosen = matches[min(state.selected, last)]
+        return replace(state, mode="idle", query="", current=chosen.index), Action.JUMP
+    if key in {Key.DOWN, Key.NEXT}:
+        return replace(state, selected=min(state.selected + 1, last)), Action.REDRAW
+    if key in {Key.UP, Key.PREVIOUS}:
         return replace(state, selected=max(state.selected - 1, 0)), Action.REDRAW
-    if key == "g":
-        return replace(state, selected=0), Action.REDRAW
-    if key == "G":
-        return replace(state, selected=len(sections) - 1), Action.REDRAW
+    if isinstance(key, str) and len(key) == 1 and key.isprintable():
+        return replace(state, query=state.query + key, selected=0), Action.REDRAW
     return state, None
 
 
@@ -136,7 +146,7 @@ def draw(
 ) -> None:
     """Render the contents across the whole alternate screen."""
     if state.mode == "toc":
-        stream.write(contents(sections, state.selected, columns, rows))
+        stream.write(contents(sections, state.selected, columns, rows, state.query))
     elif state.mode == "help":
         stream.write(shortcuts(columns, rows))
     stream.flush()

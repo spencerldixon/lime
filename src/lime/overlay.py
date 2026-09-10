@@ -6,7 +6,7 @@ import re
 
 from rich.cells import cell_len
 
-from lime.outline import Section
+from lime.outline import Section, search
 
 SYNC_START = "\x1b[?2026h"
 SYNC_END = "\x1b[?2026l"
@@ -90,16 +90,26 @@ def _tint(line: str, level: int) -> str:
     return f"{sgr}{line}{_SGR_RESET}" if sgr else line
 
 
-def contents(sections: list[Section], selected: int, width: int, rows: int) -> str:
-    """The whole outline, indented by depth, with the selected heading as a lit row."""
+def _heading(matches: list[Section], sections: list[Section], query: str) -> str:
+    """The top divider label: a plain count, or the live filter and its tally."""
+    if not query.strip():
+        return f"Contents · {len(sections)}"
+    return f"Contents · {len(matches)}/{len(sections)} · {query}▏"
+
+
+def contents(sections: list[Section], selected: int, width: int, rows: int, query: str = "") -> str:
+    """The outline narrowed to `query`, with the selected match as a lit row."""
     body = max(1, rows - 2)
-    # Indent relative to the shallowest heading, so a document whose headings
-    # all start at H2 is not permanently pushed away from the left margin.
+    matches = search(sections, query)
+    # Indent relative to the shallowest heading in the whole document, so rows do
+    # not shift sideways as the filter changes, nor a wholly-H2 outline sit adrift
+    # of the left margin.
     shallowest = min((section.level for section in sections), default=1)
-    start = window(selected, len(sections), body)
+    selected = min(selected, len(matches) - 1) if matches else 0
+    start = window(selected, len(matches), body)
     lines = []
-    for index in range(start, min(start + body, len(sections))):
-        section = sections[index]
+    for index in range(start, min(start + body, len(matches))):
+        section = matches[index]
         line = _fit("  " + "  " * (section.level - shallowest) + section.title, width)
         if index == selected:
             lines.append(f"\x1b[7m{line}\x1b[27m")
@@ -107,19 +117,21 @@ def contents(sections: list[Section], selected: int, width: int, rows: int) -> s
             lines.append(_tint(line, section.level))
     if not sections:
         lines.append(_fit("  No headings in this document", width))
+    elif not matches:
+        lines.append(_fit(f'  Nothing matches "{query}"', width))
     lines += [""] * (body - len(lines))
     return screen(
         [
-            _divider(f"Contents · {len(sections)}", width),
+            _divider(_heading(matches, sections, query), width),
             *lines[:body],
-            _divider("↑↓ jk move · Enter jump · Esc close", width),
+            _divider("↑↓ move · ⏎ jump · esc close · type to filter", width),
         ],
         rows,
     )
 
 
 SHORTCUTS: tuple[tuple[str, str], ...] = (
-    ("t", "Table of contents"),
+    ("t", "Table of contents (type to filter)"),
     ("n / p", "Next / Previous heading"),
     ("g / G", "Go to beginning / end of document"),
     ("q, Ctrl-C, Ctrl-D", "Quit"),

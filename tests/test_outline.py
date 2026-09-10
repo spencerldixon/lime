@@ -1,6 +1,6 @@
 from markdown_it import MarkdownIt
 
-from lime.outline import Section, outline
+from lime.outline import Section, outline, search
 
 
 def parse(source):
@@ -34,3 +34,28 @@ def test_headings_inside_lists_and_quotes_are_skipped():
 
 def test_document_without_headings():
     assert outline(parse("Just a paragraph.\n")) == []
+
+
+HEADINGS = [
+    Section("Installation", 2, 0, 0),
+    Section("Install with uv", 3, 1, 4),
+    Section("Configuration", 2, 2, 8),
+]
+
+
+def test_search_matches_titles_case_insensitively_in_order():
+    assert search(HEADINGS, "install") == [HEADINGS[0], HEADINGS[1]]
+    assert search(HEADINGS, "ATION") == [HEADINGS[0], HEADINGS[2]]
+
+
+def test_search_matches_anywhere_in_the_title():
+    assert search(HEADINGS, "with uv") == [HEADINGS[1]]
+
+
+def test_a_blank_query_returns_every_section():
+    assert search(HEADINGS, "") == HEADINGS
+    assert search(HEADINGS, "   ") == HEADINGS
+
+
+def test_search_returns_nothing_when_no_title_matches():
+    assert search(HEADINGS, "zzz") == []
