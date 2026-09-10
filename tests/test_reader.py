@@ -99,13 +99,7 @@ def test_arrows_move_the_selection():
     assert step(state, Key.UP, SECTIONS)[0].selected == 0
 
 
-def test_j_and_k_move_the_selection():
-    state = State("toc", 0, None)
-    assert step(state, "j", SECTIONS)[0].selected == 1
-    assert step(State("toc", 2, None), "k", SECTIONS)[0].selected == 1
-
-
-def test_ctrl_n_and_ctrl_p_also_move_the_selection():
+def test_ctrl_n_and_ctrl_p_move_the_selection():
     state = State("toc", 0, None)
     assert step(state, Key.NEXT, SECTIONS)[0].selected == 1
     assert step(State("toc", 2, None), Key.PREVIOUS, SECTIONS)[0].selected == 1
@@ -116,9 +110,22 @@ def test_the_selection_stops_at_both_ends_rather_than_wrapping():
     assert step(State("toc", 2, None), Key.DOWN, SECTIONS)[0].selected == 2
 
 
-def test_g_and_shift_g_reach_the_first_and_last_heading():
-    assert step(State("toc", 1, None), "g", SECTIONS)[0].selected == 0
-    assert step(State("toc", 1, None), "G", SECTIONS)[0].selected == 2
+def test_typing_a_printable_key_extends_the_filter_and_resets_the_selection():
+    state, action = step(State("toc", 2, None), "i", SECTIONS)
+    assert state.query == "i" and state.selected == 0 and action is Action.REDRAW
+    state, _ = step(state, "n", SECTIONS)
+    assert state.query == "in"
+
+
+def test_backspace_trims_the_filter_and_is_inert_when_it_is_empty():
+    state, action = step(State("toc", 1, None, "ins"), Key.BACKSPACE, SECTIONS)
+    assert state.query == "in" and state.selected == 0 and action is Action.REDRAW
+    assert step(State("toc", 0, None), Key.BACKSPACE, SECTIONS) == (State("toc", 0, None), None)
+
+
+def test_the_selection_clamps_to_the_filtered_match_count():
+    # "Inspect" is the only match, so a down press cannot move past row 0.
+    assert step(State("toc", 0, None, "inspect"), Key.DOWN, SECTIONS)[0].selected == 0
 
 
 def test_enter_jumps_to_the_selected_heading_and_closes():
@@ -126,20 +133,32 @@ def test_enter_jumps_to_the_selected_heading_and_closes():
     assert action is Action.JUMP and state.current == 2 and state.mode == "idle"
 
 
+def test_enter_jumps_to_the_filtered_match_by_its_outline_index():
+    # The filter leaves "Configure" as the single match; jumping targets its
+    # real outline index, not the row it happens to sit on.
+    state, action = step(State("toc", 0, None, "config"), Key.ENTER, SECTIONS)
+    assert action is Action.JUMP and state.current == 1 and state.query == ""
+
+
+def test_enter_with_no_matches_closes_without_jumping():
+    state, action = step(State("toc", 0, None, "zzz"), Key.ENTER, SECTIONS)
+    assert action is Action.CLOSE and state.mode == "idle" and state.query == ""
+
+
 def test_enter_in_a_document_without_headings_just_closes():
     state, action = step(State("toc", 0, None), Key.ENTER, [])
     assert action is Action.CLOSE and state.mode == "idle"
 
 
-def test_escape_closes_without_moving():
-    state, action = step(State("toc", 1, 0), Key.ESCAPE, SECTIONS)
-    assert state.mode == "idle" and state.current == 0 and action is Action.CLOSE
+def test_escape_closes_without_moving_and_drops_the_filter():
+    state, action = step(State("toc", 1, 0, "ins"), Key.ESCAPE, SECTIONS)
+    assert state.mode == "idle" and state.current == 0 and state.query == ""
+    assert action is Action.CLOSE
 
 
-def test_q_and_t_also_close_the_contents():
-    for key in ("q", "t"):
-        state, action = step(State("toc", 1, 0), key, SECTIONS)
-        assert action is Action.CLOSE and state.mode == "idle" and state.current == 0
+def test_ctrl_c_also_closes_the_contents():
+    state, action = step(State("toc", 1, 0, "ins"), Key.INTERRUPT, SECTIONS)
+    assert action is Action.CLOSE and state.mode == "idle" and state.current == 0
 
 
 def test_bar_omits_the_section_before_any_jump():
@@ -341,8 +360,8 @@ def test_run_leaves_the_alternate_screen_when_enter_jumps(monkeypatch):
             return lambda: stream.getvalue().count("\x1b[?2026h") >= n
 
         def send():
-            # open the contents, move down twice, jump to that heading, quit
-            for count, key in enumerate((b"t", b"j", b"j"), start=1):
+            # open the contents, move down twice (Ctrl-N), jump to that heading, quit
+            for count, key in enumerate((b"t", b"\x0e", b"\x0e"), start=1):
                 if not press(master, stream, key, frames(count)):
                     return
             if not press(master, stream, b"\r", lambda: "Inspect 3/3" in stream.getvalue()):

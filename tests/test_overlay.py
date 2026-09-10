@@ -57,6 +57,25 @@ def test_contents_highlights_the_selected_row():
     assert not next(row for row in _rows(second) if "Installation" in row).startswith("\x1b[7m")
 
 
+def test_contents_tints_each_row_by_heading_level():
+    # Levels 1-6, with the selection off-screen so no row is reverse-video.
+    sections = [Section(f"Heading {n}", n, n - 1, 0) for n in range(1, 7)]
+    rows = _rows(contents(sections, -1, 60, 40))
+
+    def row_for(level: int) -> str:
+        return next(row for row in rows if f"Heading {level}" in _plain(row))
+
+    assert row_for(1).startswith("\x1b[1;32m")  # h1: bold green
+    assert row_for(2).startswith("\x1b[1;36m")  # h2: bold cyan
+    assert row_for(3).startswith("\x1b[1;34m")  # h3: bold blue
+    assert row_for(6).startswith("\x1b[2;1m")  # h6: dim bold
+
+
+def test_the_selected_row_is_reverse_video_not_tinted():
+    row = next(row for row in _rows(contents(SECTIONS, 0, 50, 40)) if "Installation" in row)
+    assert row.startswith("\x1b[7m")
+
+
 def test_the_highlight_spans_the_whole_row():
     row = next(row for row in _rows(contents(SECTIONS, 0, 50, 40)) if "Installation" in row)
     assert visible_width(row) == 50
@@ -104,6 +123,34 @@ def test_contents_never_overflows_a_narrow_terminal_in_display_cells():
     for width in (5, 10):
         output = contents([Section("界界界", 2, 0, 0)], 0, width, 10)
         assert all(visible_width(row) <= width for row in _rows(output))
+
+
+def test_contents_filters_the_rows_to_the_query():
+    output = contents(SECTIONS, 0, 50, 40, "homebrew")
+    assert "Install with Homebrew" in output
+    assert "Installation" not in output
+
+
+def test_contents_shows_the_active_filter_and_its_tally():
+    output = contents(SECTIONS, 0, 50, 40, "install")
+    assert "2/2" in output and "install▏" in output
+
+
+def test_contents_reports_when_nothing_matches_the_query():
+    output = contents(SECTIONS, 0, 50, 40, "zzz")
+    assert 'Nothing matches "zzz"' in output
+    assert "0/2" in output
+
+
+def test_contents_clamps_a_stale_selection_to_the_match_count():
+    rows = _rows(contents(SECTIONS, 5, 50, 40, "homebrew"))
+    assert next(row for row in rows if "Homebrew" in row).startswith("\x1b[7m")
+
+
+def test_a_blank_query_leaves_every_row_and_the_plain_title():
+    output = contents(SECTIONS, 0, 50, 40, "   ")
+    assert "Installation" in output and "Homebrew" in output
+    assert "Contents · 2" in output and "/2" not in output
 
 
 def test_shortcuts_is_wrapped_in_synchronized_output():
