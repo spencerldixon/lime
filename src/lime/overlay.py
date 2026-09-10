@@ -71,6 +71,25 @@ def window(selected: int, count: int, body: int) -> int:
     return max(0, min(selected - body // 2, count - body))
 
 
+# Foreground SGR per heading level, kept in step with markdown_theme() in
+# render.py so a heading wears the same colour in the outline as in the document.
+_LEVEL_SGR: dict[int, str] = {
+    1: "\x1b[1;32m",  # bold green
+    2: "\x1b[1;36m",  # bold cyan
+    3: "\x1b[1;34m",  # bold blue
+    4: "\x1b[1m",  # bold
+    5: "\x1b[1m",  # bold
+    6: "\x1b[2;1m",  # dim bold
+}
+_SGR_RESET = "\x1b[0m"
+
+
+def _tint(line: str, level: int) -> str:
+    """Colour a whole row by its heading level, leaving unknown levels plain."""
+    sgr = _LEVEL_SGR.get(level, "")
+    return f"{sgr}{line}{_SGR_RESET}" if sgr else line
+
+
 def contents(sections: list[Section], selected: int, width: int, rows: int) -> str:
     """The whole outline, indented by depth, with the selected heading as a lit row."""
     body = max(1, rows - 2)
@@ -82,7 +101,10 @@ def contents(sections: list[Section], selected: int, width: int, rows: int) -> s
     for index in range(start, min(start + body, len(sections))):
         section = sections[index]
         line = _fit("  " + "  " * (section.level - shallowest) + section.title, width)
-        lines.append(f"\x1b[7m{line}\x1b[27m" if index == selected else line)
+        if index == selected:
+            lines.append(f"\x1b[7m{line}\x1b[27m")
+        else:
+            lines.append(_tint(line, section.level))
     if not sections:
         lines.append(_fit("  No headings in this document", width))
     lines += [""] * (body - len(lines))
