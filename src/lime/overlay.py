@@ -94,3 +94,28 @@ def contents(sections: list[Section], selected: int, width: int, rows: int) -> s
         ],
         rows,
     )
+
+
+SHORTCUTS: tuple[tuple[str, str], ...] = (
+    ("t", "Table of contents"),
+    ("n / p", "Next / Previous heading"),
+    ("g / G", "Go to beginning / end of document"),
+    ("q, Ctrl-C, Ctrl-D", "Quit"),
+    ("?", "Keyboard shortcuts"),
+)
+
+
+def shortcuts(width: int, rows: int) -> str:
+    """The full list of key bindings, one per row, on the alternate screen."""
+    body = max(1, rows - 2)
+    pad = max(len(key) for key, _ in SHORTCUTS)
+    lines = [_fit(f"  {key.ljust(pad)}  {label}", width) for key, label in SHORTCUTS]
+    lines += [""] * (body - len(lines))
+    return screen(
+        [
+            _divider("Keyboard shortcuts", width),
+            *lines[:body],
+            _divider("Any key closes", width),
+        ],
+        rows,
+    )

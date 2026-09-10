@@ -11,7 +11,7 @@ from typing import TextIO
 from lime.ghostty import END, START, Bridge, _debug, title
 from lime.keys import Key, KeyReader, raw_mode
 from lime.outline import Section
-from lime.overlay import ENTER, LEAVE, contents
+from lime.overlay import ENTER, LEAVE, contents, shortcuts
 from lime.render import END_MARK
 from lime.terminal import sync
 
@@ -51,8 +51,12 @@ def step(state: State, key: Key | str, sections: list[Section]) -> tuple[State, 
         return state, Action.QUIT
     if state.mode == "toc":
         return contents_step(state, key, sections)
+    if state.mode == "help":
+        return replace(state, mode="idle"), Action.CLOSE
     if key in {"q", Key.INTERRUPT, Key.EOF}:
         return state, Action.QUIT
+    if key == "?":
+        return replace(state, mode="help"), Action.OPEN
     if key == "t":
         # Open on the heading lime last jumped to, so the list starts where the
         # reader is rather than at the top of an unrelated document.
@@ -108,6 +112,8 @@ def draw(
     """Render the contents across the whole alternate screen."""
     if state.mode == "toc":
         stream.write(contents(sections, state.selected, columns, rows))
+    elif state.mode == "help":
+        stream.write(shortcuts(columns, rows))
     stream.flush()
 
 
@@ -217,7 +223,7 @@ def run(stream: TextIO, sections: list[Section], name: str, terminal) -> int:
                     break
                 if action is Action.OPEN:
                     stream.write(ENTER)
-                if action is Action.CLOSE or (action is Action.JUMP and opened == "toc"):
+                if action is Action.CLOSE or (action is Action.JUMP and opened != "idle"):
                     stream.write(LEAVE + "\n" * deferred_rows)
                     stream.flush()
                     deferred_rows = 0

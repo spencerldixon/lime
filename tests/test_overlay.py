@@ -1,7 +1,7 @@
 import re
 
 from lime.outline import Section
-from lime.overlay import ENTER, LEAVE, contents, screen, visible_width, window
+from lime.overlay import ENTER, LEAVE, contents, screen, shortcuts, visible_width, window
 
 SECTIONS = [Section("Installation", 2, 0, 0), Section("Install with Homebrew", 3, 1, 4)]
 MANY = [Section(f"Section {n}", 2, n, n) for n in range(50)]
@@ -104,3 +104,22 @@ def test_contents_never_overflows_a_narrow_terminal_in_display_cells():
     for width in (5, 10):
         output = contents([Section("界界界", 2, 0, 0)], 0, width, 10)
         assert all(visible_width(row) <= width for row in _rows(output))
+
+
+def test_shortcuts_is_wrapped_in_synchronized_output():
+    output = shortcuts(50, 40)
+    assert output.startswith("\x1b[?2026h") and output.endswith("\x1b[?2026l")
+
+
+def test_shortcuts_fills_the_whole_window():
+    assert len(_rows(shortcuts(50, 40))) == 40
+    assert len(_rows(shortcuts(50, 12))) == 12
+
+
+def test_shortcuts_lists_every_binding():
+    output = shortcuts(80, 40)
+    assert "Table of contents" in output
+    assert "Next / Previous heading" in output
+    assert "Go to beginning / end of document" in output
+    assert "Quit" in output
+    assert "Keyboard shortcuts" in output
