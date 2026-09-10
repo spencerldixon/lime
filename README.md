@@ -1,10 +1,9 @@
 # 🍋‍🟩 lime
 
 ### Beautiful markdown rendering in your terminal
+Built for Ghostty and macOS, might work with other things, idk, I haven't tested it.
 
 ![Lime demo](demo.gif "Demo")
-
-Built for ghostty on OSX, might work with other things, idk, I haven't tested it.
 
 ## Features
 
@@ -21,7 +20,7 @@ Built for ghostty on OSX, might work with other things, idk, I haven't tested it
 
 ## Installation
 
-Needs macOS and [Ghostty](https://ghostty.org) 1.3 or newer. Install with
+Requires macOS and [Ghostty](https://ghostty.org) 1.3 or newer. Install with
 [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```sh
@@ -34,36 +33,44 @@ If you don't have uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-That puts a `lime` command on your PATH. uv fetches its own Python and keeps
+This puts a `lime` command on your PATH. uv fetches its own Python and keeps
 the dependencies in an isolated environment, so it will not disturb any Python
 you already have.
-
-```sh
-lime README.md                                                     # read something
-uv tool install --force git+https://github.com/spencerldixon/lime  # update
-uv tool uninstall lime-markdown                                    # remove
-```
-
-The command is `lime`; the package is `lime-markdown`, which is the name to use
-when updating or removing it.
 
 ### Allow it to control Ghostty
 
 The first time you press a navigation key, macOS asks whether to allow
 controlling Ghostty. **Say yes.** Moving between headings works by asking
-Ghostty to scroll its own viewport, which goes through macOS automation.
+Ghostty to scroll its own viewport, which goes through macOS automation using osascript.
 
 If you dismiss that prompt, the document still renders and scrolls by hand, but
 `t`, `n`, `p`, `g` and `G` will silently do nothing, which looks like the keys
-are broken. Grant it later under System Settings → Privacy & Security →
-Automation, then restart lime.
+are broken. 
 
-Mermaid diagrams need one more optional tool; see
-[Mermaid and local images](#mermaid-and-local-images).
+Grant it later under `System Settings → Privacy & Security → Automation`, then restart lime.
+
+Mermaid diagrams require installing the npm package; see [Mermaid and local images](#mermaid-and-local-images).
+
+### Usage
+
+```sh
+lime README.md                                                     # read something
+```
+
+### Updating and Removing
+
+```sh
+uv tool install --force git+https://github.com/spencerldixon/lime  # update
+uv tool uninstall lime-markdown                                    # remove
+```
+
+Note: The command is `lime`; the package is `lime-markdown`, which is the name to use
+when updating or removing it.
+
 
 ## Usage
 
-Give it a file to read:
+Give lime a file to read:
 
 ```sh
 lime README.md
@@ -76,17 +83,19 @@ lime README.md
 | `g` / `G` | Go to beginning / end of document |
 | `q`, Ctrl-C, Ctrl-D | Quit |
 
-## How it works
-
-Four ideas, roughly in the order they happen.
+## How lime works
 
 ### Big headings are pictures
 
 A terminal draws one size of text, so a large heading is not something you can
-just ask for. Ghostty supports the [Kitty graphics
+just ask for. 
+
+Ghostty supports the [Kitty graphics
 protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/), which lets a
 program hand the terminal a PNG inside an escape sequence and have it drawn
-inline. So for `#`, `##` and `###`, lime renders the heading text into a
+inline. 
+
+For `#`, `##` and `###`, lime renders the heading text into a
 transparent image with Pillow and sends it (`src/lime/graphics.py`). The colours
 come from asking the terminal what its own palette is, so headings match
 whatever theme you use.
@@ -96,7 +105,7 @@ it. So underneath each one lime also prints a small dim `## Heading` line. That
 line is what ⌘F finds and what you copy. Anything deeper than `###`, and any
 heading nested inside a list or quote, stays ordinary text.
 
-### The document lives in scrollback
+### The document lives in scrollback only once
 
 Most terminal readers take over the screen using the *alternate screen*, a
 second blank buffer the terminal keeps for full-screen programs. It is why
@@ -105,18 +114,18 @@ never really applied to what you were reading.
 
 Lime does the opposite. It prints straight into your normal terminal, the same
 way `cat` does. The document simply becomes scrollback: your trackpad scrolls
-it, ⌘F searches it, selection copies it, and it is all still there after lime
+it, `⌘F` searches it, selection copies it, and it is all still there after lime
 exits. Lime prints the document exactly once and never reprints part of it, so
 scrollback holds one copy and search results are never duplicated.
 
-The one exception is the contents panel, which does use the alternate screen so
+The one exception is the table of contents panel, which does use the alternate screen so
 it can fill the window without shoving your document upwards. Closing it puts
 the screen back untouched and returns you to the heading you were reading, and
 while it is open Ghostty's search applies to the panel rather than the document.
 Resizing redraws an open panel; the document itself only reflows if you rerun
 lime.
 
-### Jumping between sections
+### Jumping between heading sections
 
 Ghostty owns the scrollback, so lime asks Ghostty to move rather than moving any
 text itself.
@@ -128,6 +137,7 @@ While printing, lime drops an invisible bookmark on its own row just before
 every top-level heading, plus one at the very start and one at the very end.
 Headings nested inside lists or quotes get no bookmark and are left out of the
 contents, since there is nowhere sensible to jump to.
+
 These are OSC 133 *prompt marks*: the signal a shell emits to say "a prompt
 starts here", which is how ⌘↑ and ⌘↓ jump between commands. Ghostty does not
 mind that lime is not a shell, so the same jumping works on headings, even after
@@ -198,12 +208,14 @@ uv run lime examples/kitchen-sink.md
 ```
 
 `uv run lime` runs the checkout without installing it, so it will not clash with
-an installed copy. `examples/kitchen-sink.md` is the test document: it includes
-headings, tables, code, local and remote image cases, Mermaid, and clearly
-labelled fallbacks for unsupported extensions. Most behaviour is covered by
-`uv run pytest` without needing a real terminal, but anything touching Ghostty's
-viewport has to be checked by eye in Ghostty.
+an installed copy. 
 
+We ship a test document at `examples/kitchen-sink.md` that includes
+headings, tables, code, local and remote image cases, Mermaid, and clearly
+labelled fallbacks for unsupported extensions. 
+
+Most behaviour is covered by `uv run pytest` without needing a real terminal, 
+but anything touching Ghostty's viewport should be checked by eye in Ghostty.
 
 ## Configuration and spacing
 
@@ -236,9 +248,10 @@ The [example configuration](config.example.yaml) documents every setting. Code
 line numbers are on by default; `line_numbers: false` disables them. Very narrow
 code blocks omit numbers to preserve room for the source.
 
-## Mermaid and local images
+## Rendering Mermaid diagrams and local images
 
 Install the optional official renderer with `npm install -g @mermaid-js/mermaid-cli`.
+
 This adds Node/Chromium dependencies, so it is deliberately separate from the
 small core package. Once `mmdc` is on PATH, top-level fenced `mermaid` blocks render
 automatically in Ghostty. Colours are derived from the terminal's foreground,
