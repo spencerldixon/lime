@@ -11,7 +11,10 @@ from typing import TextIO
 
 from PIL import Image, ImageDraw, ImageFont
 
+from lime.cache import ImageCache
 from lime.terminal import Palette, Terminal
+
+HeadingImage = tuple[bytes, int, int]
 
 FONT_CANDIDATES = (
     ("/System/Library/Fonts/HelveticaNeue.ttc", 1),
@@ -72,19 +75,29 @@ class Headings:
         width: int,
         palette: Palette,
         font: Path | None = None,
+        *,
+        cache: ImageCache[tuple[HeadingImage, ...]] | None = None,
     ) -> None:
         self.terminal, self.width, self.palette, self.font = terminal, width, palette, font
+        self._cache = cache if cache is not None else ImageCache()
 
-    def images(self, text: str, level: int) -> Iterator[tuple[bytes, int, int]]:
+    def images(self, text: str, level: int) -> Iterator[HeadingImage]:
         rows = 3 if level == 1 else 2
         scale = 2  # Supersampling keeps the font crisp on Retina displays.
         cw, ch = self.terminal.cell_width, self.terminal.cell_height
+        key = (text, level, self.width, cw, ch, self.palette, self.font)
+        cached = self._cache.get(key)
+        if cached is not None:
+            yield from cached
+            return
         height = rows * ch * scale
         width = self.width * cw * scale
         if width * height > 16_000_000:
             raise ValueError("heading image exceeds pixel budget")
         ratio = {1: 0.72, 2: 0.78, 3: 0.62}[level]
         font = load_font(max(1, int(height * ratio)), self.font)
+        images: list[HeadingImage] | None = []
+        size = 0
         for line in wrap_heading(text, font, max(1, width - cw * scale)):
             left, top, right, bottom = font.getbbox(line)
             columns = min(self.width, max(1, math.ceil((right - left) / (cw * scale)) + 1))
@@ -97,7 +110,17 @@ class Headings:
             )
             buffer = io.BytesIO()
             canvas.save(buffer, format="PNG")
-            yield buffer.getvalue(), columns, rows
+            image = buffer.getvalue(), columns, rows
+            if images is not None:
+                size += len(image[0])
+                if size <= self._cache.max_bytes:
+                    images.append(image)
+                else:
+                    # Long headings still stream without retaining an oversized entry.
+                    images = None
+            yield image
+        if images is not None:
+            self._cache.put(key, tuple(images), size)
 
     def write(self, stream: TextIO, text: str, level: int, margin: int) -> None:
         for png, columns, rows in self.images(text, level):

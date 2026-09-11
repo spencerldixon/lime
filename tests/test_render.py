@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from PIL import Image
 from rich.cells import cell_len
 from rich.console import Console
 
+from lime.cache import ImageCache
 from lime.graphics import Headings, encode_png, load_font, wrap_heading
 from lime.outline import Section
 from lime.render import RowCounter, markdown_theme, render
@@ -171,3 +173,91 @@ def test_anchors_add_no_escapes_and_leave_plain_output_clean():
     stream = io.StringIO()
     render("# One\n\nbody\n", Console(file=stream, width=40), base=Path.cwd(), anchors=[])
     assert "\x1b" not in stream.getvalue()  # nothing is written for an anchor
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["text", "level", "width", "cell_width", "cell_height", "palette", "font"],
+)
+def test_heading_cache_accounts_for_every_raster_input(monkeypatch, change):
+    calls = []
+
+    def font(size, custom=None):
+        calls.append((size, custom))
+        return load_font(size)
+
+    monkeypatch.setattr("lime.graphics.load_font", font)
+    cache = ImageCache()
+    terminal = Terminal()
+    original = list(Headings(terminal, 40, PALETTE, cache=cache).images("Title", 1))
+    assert list(Headings(terminal, 40, PALETTE, cache=cache).images("Title", 1)) == original
+    assert len(calls) == 1
+
+    text, level, width, palette, custom = "Title", 1, 40, PALETTE, None
+    if change == "text":
+        text = "Another title"
+    elif change == "level":
+        level = 2
+    elif change == "width":
+        width = 20
+    elif change in {"cell_width", "cell_height"}:
+        terminal = replace(terminal, **{change: getattr(terminal, change) + 1})
+    elif change == "palette":
+        palette = tuple(reversed(PALETTE))
+    else:
+        custom = Path("another-font.ttf")
+    list(Headings(terminal, width, palette, custom, cache=cache).images(text, level))
+    assert len(calls) == 2
+
+
+def test_warm_heading_cache_preserves_output_and_anchor_rows():
+    source = "# A heading long enough to wrap\n\nBody.\n\n## Café 日本語\n"
+    headings = Headings(Terminal(), 20, PALETTE)
+
+    def draw():
+        output = io.StringIO()
+        console = Console(file=RowCounter(output), width=20, theme=markdown_theme())
+        anchors = []
+        sections = render(source, console, base=Path.cwd(), headings=headings, anchors=anchors)
+        return output.getvalue(), anchors, sections
+
+    cold = draw()
+    assert draw() == cold
+    assert "# A heading" in cold[0] and "## Café 日本語" in cold[0]
+
+
+def test_oversized_headings_still_stream_without_being_cached(monkeypatch):
+    calls = []
+
+    def font(size, custom=None):
+        calls.append(size)
+        return load_font(size)
+
+    monkeypatch.setattr("lime.graphics.load_font", font)
+    headings = Headings(Terminal(), 20, PALETTE, cache=ImageCache(max_bytes=1))
+    first = list(headings.images("A long heading that wraps", 1))
+    assert len(first) > 1
+    assert list(headings.images("A long heading that wraps", 1)) == first
+    assert len(calls) == 2
+
+
+def test_failed_heading_render_keeps_text_and_can_retry(monkeypatch):
+    calls = []
+
+    def font(size, custom=None):
+        calls.append(size)
+        if len(calls) == 1:
+            raise OSError("font unavailable")
+        return load_font(size)
+
+    monkeypatch.setattr("lime.graphics.load_font", font)
+    headings = Headings(Terminal(), 40, PALETTE)
+    outputs = []
+    for _ in range(3):
+        stream = io.StringIO()
+        render("# Title", Console(file=stream, width=40), base=Path.cwd(), headings=headings)
+        outputs.append(stream.getvalue())
+    assert "Title" in outputs[0] and "\x1b_G" not in outputs[0]
+    assert "# Title" in outputs[1] and "\x1b_G" in outputs[1]
+    assert outputs[1] == outputs[2]
+    assert len(calls) == 2

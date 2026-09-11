@@ -130,6 +130,16 @@ The document is printed at a fixed measure (`width`, 88 columns by default) and
 centred in the window, so a wider window adds even margins on both sides rather
 than stretching the text.
 
+Resizing can reuse Mermaid diagrams and heading images already generated during
+the session. The first render still pays the generation cost. Headings need new
+images when the content width changes to a size that is not cached; Mermaid
+diagrams can reuse their PNG at different widths.
+
+The two caches each retain at most 16 MiB of PNG data and 256 entries. Older
+entries may be evicted and generated again. Images too large for the cache still
+render normally, and failed renders are retried on the next reprint. Both caches
+are kept in memory and discarded when lime exits.
+
 ### Jumping between heading sections
 
 Ghostty owns the scrollback, so lime asks Ghostty to move its viewport rather

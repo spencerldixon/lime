@@ -7,8 +7,9 @@ from pathlib import Path
 
 from rich.console import Console
 
+from lime.cache import ImageCache
 from lime.config import load_settings
-from lime.graphics import Headings
+from lime.graphics import HeadingImage, Headings
 from lime.images import Images
 from lime.mermaid import Mermaid
 from lime.reader import Layout
@@ -39,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     graphics = not plain and terminal.rows >= 6 and terminal.graphics
     native_theme = query_palette() if graphics else None
     normalized_source = clean_text(source)
+    heading_cache = ImageCache[tuple[HeadingImage, ...]]()
+    mermaid_cache = ImageCache[bytes]()
 
     def print_document(columns: int, rows: int) -> Layout:
         """Render the document once at the given size; report its heading rows.
@@ -69,8 +72,14 @@ def main(argv: list[str] | None = None) -> int:
             highlight=False,
             markup=False,
         )
-        headings = Headings(local, width - margin * 2, native_theme.palette) if native_theme else None
-        mermaid = Mermaid(local, width - margin * 2, native_theme) if native_theme else None
+        headings = (
+            Headings(local, width - margin * 2, native_theme.palette, cache=heading_cache)
+            if native_theme else None
+        )
+        mermaid = (
+            Mermaid(local, width - margin * 2, native_theme, cache=mermaid_cache)
+            if native_theme else None
+        )
         anchors: list[int] = []
         render_options = {
             "base": Path.cwd() if file == "-" else path.resolve().parent,

@@ -4,9 +4,11 @@ import subprocess
 import sys
 
 import pytest
+from PIL import Image
 
 from lime.cli import main
-from lime.terminal import Terminal
+from lime.graphics import load_font
+from lime.terminal import Terminal, TerminalTheme
 
 
 def run(*args, source=None, env=None):
@@ -190,3 +192,56 @@ def test_no_color_never_enters_the_reader(monkeypatch):
     )
     assert main(["-"]) == 0
     assert not called
+
+
+def test_render_caches_survive_resizes_but_not_document_sessions(tmp_path, monkeypatch):
+    source = (
+        "# One\n\n```mermaid\ngraph LR; A-->B\n```\n\n"
+        "## Two\n\n```mermaid\ngraph LR; C-->D\n```\n"
+    )
+    diagram = io.BytesIO()
+    Image.new("RGBA", (100, 50), "red").save(diagram, format="PNG")
+    fonts, diagrams = [], []
+
+    def font(size, custom=None):
+        fonts.append(size)
+        return load_font(size, custom)
+
+    def png(self, source):
+        diagrams.append(source)
+        return diagram.getvalue()
+
+    monkeypatch.setattr("lime.graphics.load_font", font)
+    monkeypatch.setattr("lime.mermaid.Mermaid.png", png)
+    monkeypatch.setenv("XDG_CONFIG_HOME", configured(tmp_path, "width: 88\n"))
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    monkeypatch.setattr(
+        Terminal, "detect", lambda _: Terminal(columns=100, rows=40, is_tty=True, graphics=True)
+    )
+    monkeypatch.setattr(
+        "lime.cli.query_palette",
+        lambda: TerminalTheme(((10, 20, 30), (40, 50, 60), (70, 80, 90)), (255, 255, 255), (0, 0, 0)),
+    )
+
+    def reader(stream, layout, name, terminal, *, reprint):
+        initial_fonts, initial_diagrams = len(fonts), len(diagrams)
+        for columns, rows in [(120, 40), (120, 50)]:
+            reprint(columns, rows)
+            assert len(fonts) == initial_fonts  # Only margins / viewport height changed.
+            assert len(diagrams) == initial_diagrams
+        reprint(40, 50)
+        assert len(fonts) == initial_fonts + 2  # Narrower content needs new heading images.
+        assert len(diagrams) == initial_diagrams
+        restored = reprint(100, 40)
+        assert len(fonts) == initial_fonts + 2  # The earlier width is still cached.
+        assert len(diagrams) == initial_diagrams
+        assert restored == layout
+        return 0
+
+    monkeypatch.setattr("lime.cli.read", reader)
+    for session in range(1, 3):
+        monkeypatch.setattr("sys.stdin", io.StringIO(source))
+        assert main(["-"]) == 0
+        assert len(diagrams) == session * 2
+        assert len(fonts) == session * 4
