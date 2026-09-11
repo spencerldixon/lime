@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlsplit
 
 from PIL import Image
 
-from lime.graphics import encode_png
+from lime.graphics import write_png
 from lime.terminal import Terminal
 
 
@@ -33,9 +33,7 @@ def write_image(
         )
         buffer = io.BytesIO()
         tile.save(buffer, format="PNG")
-        stream.write("\n" * count + f"\033[{count}A\r" + " " * margin)
-        stream.writelines(encode_png(buffer.getvalue(), columns, count))
-        stream.write("\r" + "\n" * count)
+        write_png(stream, buffer.getvalue(), columns, count, margin)
     stream.flush()
 
 

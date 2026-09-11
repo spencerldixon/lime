@@ -56,59 +56,28 @@ class KeyReader:
         """
         while True:
             event, remainder = decode(self.buffer)
-            ambiguous_escape = event is Key.ESCAPE and self.buffer == b"\x1b"
-            if ambiguous_escape:
-                ready, _, _ = select.select(
-                    [self.fd, *([self.wake_fd] if self.wake_fd is not None else [])],
-                    [],
-                    [],
-                    self.timeout,
-                )
-                if self.wake_fd is not None and self.wake_fd in ready:
-                    return None
-                if not ready:
-                    # Escape is the only partial input with a useful standalone
-                    # meaning. Preserve bytes that followed it for the next event.
-                    self.buffer = remainder if event is Key.ESCAPE else self.buffer[1:]
-                    return Key.ESCAPE
-                chunk = os.read(self.fd, self.chunk_size)
-                if not chunk:
-                    return Key.EOF
-                self.buffer += chunk
-                continue
-            if event is not None:
+            # Complete events return immediately, except a bare Escape: it may
+            # still be the start of a sequence whose remaining bytes are on the way.
+            if event is not None and self.buffer != b"\x1b":
                 self.buffer = remainder
                 return event
-            if remainder != self.buffer:
+            if event is None and remainder != self.buffer:
                 self.buffer = remainder
                 continue
             ambiguous_escape = self.buffer.startswith(b"\x1b")
-            if ambiguous_escape:
-                ready, _, _ = select.select(
-                    [self.fd, *([self.wake_fd] if self.wake_fd is not None else [])],
-                    [],
-                    [],
-                    self.timeout,
-                )
-                if self.wake_fd is not None and self.wake_fd in ready:
-                    return None
-                if not ready:
-                    self.buffer = self.buffer[1:]
-                    return Key.ESCAPE
-                chunk = os.read(self.fd, self.chunk_size)
-                if not chunk:
-                    return Key.EOF
-                self.buffer += chunk
-                continue
             ready, _, _ = select.select(
                 [self.fd, *([self.wake_fd] if self.wake_fd is not None else [])],
                 [],
                 [],
-                timeout,
+                self.timeout if ambiguous_escape else timeout,
             )
             if self.wake_fd is not None and self.wake_fd in ready:
                 return None
             if not ready:
+                if ambiguous_escape:
+                    # Consume only Escape; keep any following bytes for the next event.
+                    self.buffer = self.buffer[1:]
+                    return Key.ESCAPE
                 if timeout is not None:
                     return None
                 continue
