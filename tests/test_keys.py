@@ -170,10 +170,70 @@ def test_raw_mode_delivers_ctrl_c_as_a_cancel_key():
         os.close(slave)
 
 
-def test_reader_returns_eof_once_the_input_fd_is_closed():
+@pytest.mark.parametrize("prefix", [b"", b"\x1b", b"\x1b[", b"\xc3"])
+def test_reader_returns_eof_once_the_input_fd_is_closed(prefix):
     read_end, write_end = os.pipe()
     try:
         os.close(write_end)
-        assert KeyReader(read_end).read() is Key.EOF
+        reader = KeyReader(read_end)
+        reader.buffer = prefix
+        assert reader.read() is Key.EOF
     finally:
         os.close(read_end)
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix", "expected"),
+    [
+        (b"", b"t", "t"),
+        (b"\x1b", b"[A", Key.UP),
+        (b"\x1b[", b"A", Key.UP),
+        (b"\xc3", b"\xa9", "é"),
+    ],
+)
+def test_wakeup_preserves_partial_input_and_queued_keys(prefix, suffix, expected):
+    read_end, write_end = os.pipe()
+    wake_read, wake_write = os.pipe()
+    try:
+        reader = KeyReader(read_end, wake_fd=wake_read)
+        reader.buffer = prefix
+        os.write(write_end, suffix + b"q")
+        os.write(wake_write, b"\0")
+        assert reader.read(timeout=0) is None  # Resize wins when both descriptors are ready.
+        assert reader.buffer == prefix
+        os.read(wake_read, 1)
+        assert reader.read(timeout=0) == expected
+        assert reader.read(timeout=0) == "q"
+    finally:
+        for fd in (read_end, write_end, wake_read, wake_write):
+            os.close(fd)
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix", "expected"), [(b"", b"t", "t"), (b"\xc3", b"\xa9", "é")]
+)
+def test_idle_timeout_keeps_partial_input_for_the_next_read(prefix, suffix, expected):
+    read_end, write_end = os.pipe()
+    try:
+        reader = KeyReader(read_end)
+        reader.buffer = prefix
+        assert reader.read(timeout=0) is None
+        assert reader.buffer == prefix
+        os.write(write_end, suffix)
+        assert reader.read(timeout=0) == expected
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+
+
+@pytest.mark.parametrize("prefix", [b"\x1b[", b"\x1bO", b"\x1b[1;"])
+def test_escape_timeout_leaves_the_rest_of_a_truncated_sequence(prefix):
+    read_end, write_end = os.pipe()
+    try:
+        reader = KeyReader(read_end, timeout=0)
+        os.write(write_end, prefix)
+        assert reader.read(timeout=0) is Key.ESCAPE
+        assert "".join(reader.read(timeout=0) for _ in prefix[1:]) == prefix[1:].decode()
+    finally:
+        os.close(read_end)
+        os.close(write_end)

@@ -68,6 +68,15 @@ def encode_png(png: bytes, columns: int, rows: int) -> Iterator[str]:
         yield f"\033_G{control}m={more};{chunk}\033\\"
 
 
+def write_png(stream: TextIO, png: bytes, columns: int, rows: int, margin: int) -> None:
+    """Place a PNG inline and leave the cursor below it; the caller controls flushing."""
+    # Reserve space before placement, including at the bottom of the screen.
+    # Cursor motion stays inside the newly reserved rows.
+    stream.write("\n" * rows + f"\033[{rows}A\r" + " " * margin)
+    stream.writelines(encode_png(png, columns, rows))
+    stream.write("\r" + "\n" * rows)
+
+
 class Headings:
     def __init__(
         self,
@@ -124,9 +133,5 @@ class Headings:
 
     def write(self, stream: TextIO, text: str, level: int, margin: int) -> None:
         for png, columns, rows in self.images(text, level):
-            # Reserve space *before* placement, including when at the bottom of
-            # the screen. Cursor motion stays inside the newly reserved rows.
-            stream.write("\n" * rows + f"\033[{rows}A\r" + " " * margin)
-            stream.writelines(encode_png(png, columns, rows))
-            stream.write("\r" + "\n" * rows)
+            write_png(stream, png, columns, rows, margin)
             stream.flush()
