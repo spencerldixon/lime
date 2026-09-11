@@ -12,6 +12,7 @@ from typing import TextIO
 
 from PIL import Image
 
+from lime.cache import ImageCache
 from lime.images import write_image
 from lime.terminal import Terminal, TerminalTheme
 
@@ -21,8 +22,16 @@ def hex_color(rgb):
 
 
 class Mermaid:
-    def __init__(self, terminal: Terminal, width: int, theme: TerminalTheme):
+    def __init__(
+        self,
+        terminal: Terminal,
+        width: int,
+        theme: TerminalTheme,
+        *,
+        cache: ImageCache[bytes] | None = None,
+    ):
         self.terminal, self.width, self.theme = terminal, width, theme
+        self._cache = cache if cache is not None else ImageCache()
 
     def png(self, source: str) -> bytes:
         command = shutil.which("mmdc")
@@ -97,8 +106,14 @@ class Mermaid:
             return image.read_bytes()
 
     def write(self, stream: TextIO, source: str, margin: int) -> None:
-        with Image.open(io.BytesIO(self.png(source))) as source_image:
+        key = (source, self.theme)
+        cached = self._cache.get(key)
+        png = self.png(source) if cached is None else cached
+        with Image.open(io.BytesIO(png)) as source_image:
             if source_image.width * source_image.height > 20_000_000:
                 raise ValueError("diagram exceeds 20 megapixels; showing source")
             image = source_image.convert("RGBA")
         write_image(stream, image, self.terminal, self.width, margin)
+        if cached is None:
+            # Only retain successful images: failures must remain retryable.
+            self._cache.put(key, png, len(png))

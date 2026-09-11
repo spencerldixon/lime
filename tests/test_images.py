@@ -1,12 +1,14 @@
 import io
 import re
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from PIL import Image
 from rich.console import Console
 
+from lime.cache import ImageCache
 from lime.images import Images, write_image
 from lime.mermaid import Mermaid
 from lime.render import render
@@ -72,3 +74,69 @@ def test_mermaid_renderer_failure_is_readable(monkeypatch, error):
     monkeypatch.setattr("lime.mermaid.subprocess.run", fail)
     with pytest.raises(ValueError, match="showing source"):
         Mermaid(Terminal(), 80, THEME).png("invalid")
+
+
+@pytest.fixture
+def diagram_png():
+    buffer = io.BytesIO()
+    Image.new("RGBA", (320, 900), "red").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_cached_mermaid_png_is_resized_and_placed_for_the_new_terminal(monkeypatch, diagram_png):
+    calls = []
+
+    def png(self, source):
+        calls.append(source)
+        return diagram_png
+
+    monkeypatch.setattr(Mermaid, "png", png)
+    cache = ImageCache()
+    Mermaid(Terminal(), 80, THEME, cache=cache).write(io.StringIO(), "graph LR; A-->B", 0)
+    terminal = Terminal(rows=10)
+    actual, expected = io.StringIO(), io.StringIO()
+    Mermaid(terminal, 12, THEME, cache=cache).write(actual, "graph LR; A-->B", 4)
+    with Image.open(io.BytesIO(diagram_png)) as image:
+        write_image(expected, image.convert("RGBA"), terminal, 12, 4)
+    assert calls == ["graph LR; A-->B"]
+    assert actual.getvalue() == expected.getvalue()
+
+
+def test_mermaid_cache_keys_include_source_and_theme(monkeypatch, diagram_png):
+    calls = []
+
+    def png(self, source):
+        calls.append((source, self.theme))
+        return diagram_png
+
+    monkeypatch.setattr(Mermaid, "png", png)
+    cache = ImageCache()
+    variants = [
+        ("graph LR; A-->B", THEME),
+        ("graph LR; C-->D", THEME),
+        ("graph LR; A-->B", replace(THEME, background=(0, 0, 0))),
+    ]
+    for source, theme in variants * 2:
+        Mermaid(Terminal(), 80, theme, cache=cache).write(io.StringIO(), source, 0)
+    assert calls == variants
+
+
+@pytest.mark.parametrize("failure", [ValueError("renderer timed out; showing source"), b"invalid"])
+def test_failed_mermaid_images_are_retried_then_cached(monkeypatch, diagram_png, failure):
+    calls = []
+
+    def png(self, source):
+        calls.append(source)
+        if len(calls) == 1:
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+        return diagram_png
+
+    monkeypatch.setattr(Mermaid, "png", png)
+    renderer = Mermaid(Terminal(), 80, THEME)
+    with pytest.raises((ValueError, OSError)):
+        renderer.write(io.StringIO(), "graph LR; A-->B", 0)
+    renderer.write(io.StringIO(), "graph LR; A-->B", 0)
+    renderer.write(io.StringIO(), "graph LR; A-->B", 0)
+    assert len(calls) == 2
